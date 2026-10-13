@@ -10,6 +10,10 @@ mod gl;
 mod image;
 mod ipc;
 mod overlay;
+mod paint;
+mod picker;
+mod state;
+mod ui;
 
 use std::process::ExitCode;
 

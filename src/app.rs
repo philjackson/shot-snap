@@ -30,7 +30,8 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::Z
 use crate::annotate;
 use crate::capture::{Batch, NoEvents, OutputMeta};
 use crate::clipboard::Clipboard;
-use crate::config::{self, Config};
+use crate::config::Config;
+use crate::state;
 use crate::deliver::{self, Action, Delivered, Plan};
 use crate::geom::Rect;
 use crate::gl::Gl;
@@ -277,7 +278,7 @@ impl App {
             .filter_map(|f| outputs.iter().find(|o| o.logical == f.logical).map(|o| (o.id, f)))
             .collect();
         let remember = self.config.remember_last_region && mode == overlay::Mode::Region;
-        let preselect = if remember { config::load_last_region() } else { None };
+        let preselect = if remember { state::last_region() } else { None };
         let init = overlay::Init { compositor: &self.compositor, layer_shell: &self.layer_shell, viewporter: &self.viewporter, qh: &self.qh };
         let confirm = self.config.confirm_region || self.config.remember_last_region;
         self.overlay = Some(Overlay::new(init, mode, outputs, frozen, self.config.theme.clone(), confirm, preselect));
@@ -289,8 +290,11 @@ impl App {
         let Some(overlay) = &mut self.overlay else { return };
         if overlay.mode == overlay::Mode::Region && self.config.remember_last_region
             && let Some(sel) = overlay.selection() {
-                config::save_last_region(sel);
+                state::save_last_region(sel);
             }
+        if let Some(annotate) = overlay.take_annotate_state() {
+            state::save_annotate(annotate);
+        }
         let frozen = overlay.take_frozen();
         let (area, action) = match outcome {
             Outcome::Cancel => return self.finish(Response::Cancelled),
@@ -409,7 +413,8 @@ impl App {
         let scale = f64::from(image.width) / shown.w;
         self.overlay = None;
         let init = overlay::Init { compositor: &self.compositor, layer_shell: &self.layer_shell, viewporter: &self.viewporter, qh: &self.qh };
-        self.overlay = Some(Overlay::new_editor(init, target, image, scale, self.config.theme.clone()));
+        let annotate = state::load().annotate;
+        self.overlay = Some(Overlay::new_editor(init, target, image, scale, self.config.theme.clone(), annotate));
         self.cursor_shape = None;
         self.set_stage(Stage::Editing);
     }

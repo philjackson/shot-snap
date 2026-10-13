@@ -48,11 +48,29 @@ the editor closes.
 
 | Key | Action |
 |---|---|
-| Esc / ✕ | Close without saving |
+| Esc / ✕ | Close the colour panel, or close the editor without saving |
 | Enter / ✓ | Done: use the configured outputs |
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
 | Ctrl+Z | Undo the last rectangle |
+| Delete | Remove the selected gradient stop (colour panel open) |
+
+#### Colours and gradients
+
+The swatch button next to the rectangle tool opens the colour panel. New rectangles use whatever
+it shows.
+
+- **Solid**: 5 built-in colours, your 10 most recent picks, and a saturation/value square with a
+  hue bar for anything else.
+- **Gradient**: 5 built-in gradients, your 10 most recent, and an editor. Click the bar to add a
+  stop. Drag a stop to move it, or drag it down off the bar (or press Delete) to remove it; there
+  are always at least two. Click a stop to recolour it with the square and hue bar. The angle
+  slider works like CSS (0° points up, 90° right), in 5° steps. A gradient spans each rectangle's
+  outer edge.
+
+A pick counts as recent when you close the panel or the editor; the built-ins are never added.
+Recents and the current paint are kept in `$XDG_STATE_HOME/shot-snap/state.toml`
+(`~/.local/state/…`), not in the config.
 
 ### Hyprland example
 

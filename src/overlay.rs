@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use femtovg::{Baseline, Canvas, ImageFlags, ImageId, Paint, Path};
+use femtovg::{Canvas, ImageFlags, ImageId, Paint, Path};
 use femtovg::renderer::OpenGl;
 use smithay_client_toolkit::compositor::{CompositorState, FrameCallbackData};
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
@@ -25,6 +25,10 @@ use crate::deliver::Action;
 use crate::geom::Rect;
 use crate::gl::{Gl, GlSurface};
 use crate::image::{Image, OutputFrame};
+use crate::paint::Fill;
+use crate::picker::Picker;
+use crate::state::AnnotateState;
+use crate::ui::{card, fill_rect, text_paint, text_width};
 
 const BORDER_WIDTH: f32 = 2.0;
 const HANDLE_MARGIN: f64 = 15.0;
@@ -67,6 +71,7 @@ pub enum Outcome {
 enum Hit {
     Output(u32),
     RectangleTool,
+    Color,
     Copy,
     Save,
     Done,
@@ -149,6 +154,7 @@ pub struct Overlay {
     over_toolbar: bool,
     annotations: Vec<Annotation>,
     editor: Option<Editor>,
+    picker: Option<Picker>,
     theme: Theme,
     hidden: bool,
 }
@@ -200,16 +206,27 @@ impl Overlay {
             over_toolbar: false,
             annotations: Vec::new(),
             editor: None,
+            picker: None,
             theme,
             hidden: false,
         }
     }
 
     /// The annotation editor for an already-captured image, on `output` only.
-    pub fn new_editor(init: Init, output: OutputMeta, image: Image, scale: f64, theme: Theme) -> Self {
+    pub fn new_editor(init: Init, output: OutputMeta, image: Image, scale: f64, theme: Theme, annotate: AnnotateState) -> Self {
         let mut overlay = Self::new(init, Mode::Annotate, vec![output], Vec::new(), theme, false, None);
         overlay.editor = Some(Editor { image, scale, canvas: Rect::default(), fit: 1.0 });
+        overlay.picker = Some(Picker::new(annotate));
         overlay
+    }
+
+    /// The colour panel's state to persist, with the current pick recorded.
+    pub fn take_annotate_state(&mut self) -> Option<AnnotateState> {
+        self.picker.take().map(Picker::finish)
+    }
+
+    fn picker_open(&self) -> bool {
+        self.picker.as_ref().is_some_and(|p| p.open)
     }
 
     pub fn take_image(&mut self) -> Option<Image> {
@@ -320,6 +337,7 @@ impl Overlay {
         match (self.mode, self.drag) {
             (Mode::Picker, _) if self.hover_button.is_some() => Shape::Pointer,
             (Mode::Picker, _) => Shape::Default,
+            (Mode::Annotate, _) if self.picker.as_ref().is_some_and(|p| p.dragging()) => Shape::Default,
             (Mode::Annotate, Drag::None) if self.hover_button.is_some() => Shape::Pointer,
             (Mode::Annotate, Drag::None) if self.over_toolbar => Shape::Default,
             (_, Drag::Draw { .. }) => Shape::Crosshair,
@@ -371,6 +389,11 @@ impl Overlay {
         let o = self.surfs[i].meta.logical;
         let p = (o.x + pos.0, o.y + pos.1);
         self.pointer = Some(p);
+        if let Some(picker) = self.picker.as_mut().filter(|p| p.dragging()) {
+            picker.motion(pos);
+            self.redraw_all(qh);
+            return;
+        }
         match self.drag {
             Drag::Select { anchor } => self.selection = Some(Rect::from_points(anchor, self.clamp_point(p))),
             Drag::Move { grab } => {
@@ -404,7 +427,11 @@ impl Overlay {
         if self.drag == Drag::None {
             let s = &self.surfs[i];
             self.hover_button = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
-            self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos));
+            // The colour panel counts as toolbar: it's chrome, not canvas.
+            self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos)) || self.picker.as_ref().is_some_and(|pk| pk.contains(pos));
+            if self.over_toolbar && self.picker.as_ref().is_some_and(|pk| pk.contains(pos)) {
+                self.hover_button = None;
+            }
         }
         self.redraw_all(qh);
     }
@@ -423,12 +450,26 @@ impl Overlay {
                 return Some(Outcome::Picked(id));
             }
             (Mode::Picker, false) => None,
+            (Mode::Annotate, true) if self.press_picker(p) => None,
             (Mode::Annotate, true) => match self.hover_button {
+                Some(Hit::Color) => {
+                    if let Some(picker) = &mut self.picker {
+                        picker.toggle();
+                    }
+                    None
+                }
                 Some(Hit::Copy) => return Some(self.annotated(Action::Copy)),
                 Some(Hit::Save) => return Some(self.annotated(Action::Save)),
                 Some(Hit::Done) => return Some(self.annotated(Action::Default)),
                 Some(Hit::Close) => return Some(Outcome::Cancel),
                 _ if self.over_toolbar => None,
+                // A click outside the open panel just closes it.
+                _ if self.picker_open() => {
+                    if let Some(picker) = &mut self.picker {
+                        picker.close();
+                    }
+                    None
+                }
                 _ => {
                     // Drawing starts on the image; the drag may then leave it and is clamped.
                     if let Some(ip) = self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
@@ -438,12 +479,16 @@ impl Overlay {
                 }
             },
             (Mode::Annotate, false) => {
+                if let Some(picker) = self.picker.as_mut().filter(|p| p.dragging()) {
+                    picker.release();
+                }
                 if let (Drag::Draw { anchor }, Some(ip)) = (std::mem::replace(&mut self.drag, Drag::None), self.to_image(p)) {
                     let rect = Rect::from_points(anchor, self.clamp_image(ip));
                     let scale = self.editor.as_ref().map_or(1.0, |e| e.scale);
                     // Ignore clicks: the rectangle must be at least a couple of logical pixels.
                     if rect.w >= MIN_SELECTION * scale && rect.h >= MIN_SELECTION * scale {
-                        self.annotations.push(Annotation { rect, width: annotate::DEFAULT_WIDTH * scale, color: annotate::DEFAULT_COLOR });
+                        let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
+                        self.annotations.push(Annotation { rect, width: annotate::DEFAULT_WIDTH * scale, fill });
                     }
                 }
                 None
@@ -478,12 +523,27 @@ impl Overlay {
         if self.hidden {
             return None;
         }
+        // Esc closes the colour panel before it closes the editor.
+        if keysym == Keysym::Escape && self.picker_open() {
+            if let Some(picker) = &mut self.picker {
+                picker.close();
+            }
+            self.redraw_all(qh);
+            return None;
+        }
         if keysym == Keysym::Escape {
             return Some(Outcome::Cancel);
         }
         if self.mode == Mode::Annotate {
             return match keysym {
                 _ if self.drag != Drag::None => None,
+                Keysym::Delete | Keysym::BackSpace if self.picker_open() => {
+                    if let Some(picker) = &mut self.picker {
+                        picker.delete_stop();
+                    }
+                    self.redraw_all(qh);
+                    None
+                }
                 Keysym::Return | Keysym::KP_Enter if !mods.ctrl => Some(self.annotated(Action::Default)),
                 Keysym::c | Keysym::C if mods.ctrl => Some(self.annotated(Action::Copy)),
                 Keysym::s | Keysym::S if mods.ctrl => Some(self.annotated(Action::Save)),
@@ -525,6 +585,13 @@ impl Overlay {
         e.fit = fit;
     }
 
+    /// Routes a press to the open colour panel; true if the panel took it.
+    fn press_picker(&mut self, p: (f64, f64)) -> bool {
+        let Some(s) = self.surfs.first() else { return false };
+        let local = (p.0 - s.meta.logical.x, p.1 - s.meta.logical.y);
+        self.picker.as_mut().is_some_and(|picker| picker.open && picker.press(local))
+    }
+
     fn annotated(&self, action: Action) -> Outcome {
         Outcome::Annotated(self.annotations.clone(), action)
     }
@@ -561,6 +628,7 @@ impl Overlay {
         if self.mode == Mode::Annotate {
             self.layout_editor(i);
         }
+        let picker_open = self.picker_open();
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
 
         let s = &mut self.surfs[i];
@@ -649,13 +717,15 @@ impl Overlay {
                     // Strokes are clipped to the image, as they are when burned in.
                     canvas.save();
                     canvas.scissor(cx, cy, cw, ch);
-                    let preview = drawing.map(|rect| Annotation { rect, width: annotate::DEFAULT_WIDTH * e.scale, color: annotate::DEFAULT_COLOR });
-                    for shape in self.annotations.iter().copied().chain(preview) {
-                        let r = shape.rect;
-                        let fit = e.fit as f32;
+                    let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
+                    let preview = drawing.map(|rect| Annotation { rect, width: annotate::DEFAULT_WIDTH * e.scale, fill });
+                    let to_local = |r: Rect| Rect { x: c.x + r.x / e.fit, y: c.y + r.y / e.fit, w: r.w / e.fit, h: r.h / e.fit };
+                    for shape in self.annotations.iter().chain(preview.as_ref()) {
+                        let r = to_local(shape.rect);
                         let mut path = Path::new();
-                        path.rect(cx + r.x as f32 / fit, cy + r.y as f32 / fit, r.w as f32 / fit, r.h as f32 / fit);
-                        canvas.stroke_path(&path, &Paint::color(shape.color.fv()).with_line_width(shape.width as f32 / fit));
+                        path.rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+                        let paint = shape.fill.paint(to_local(shape.bounds())).with_line_width((shape.width / e.fit) as f32);
+                        canvas.stroke_path(&path, &paint);
                     }
                     canvas.restore();
                     // Inset outline separating the image from the surround; never exported.
@@ -663,7 +733,12 @@ impl Overlay {
                     path.rect(cx + 0.5, cy + 0.5, cw - 1.0, ch - 1.0);
                     canvas.stroke_path(&path, &Paint::color(t.outline.fv()).with_line_width(1.0));
                 }
-                (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, self.hover_button, w);
+                let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
+                (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, self.hover_button, w, &fill, picker_open);
+                let anchor = s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).map(|(r, _)| *r);
+                if let (Some(picker), Some(anchor), Some(bar)) = (self.picker.as_mut().filter(|p| p.open), anchor, s.toolbar) {
+                    picker.draw(canvas, font, t, anchor, (bar.bottom() as f32) + SPACE_SM, w);
+                }
             }
         }
 
@@ -706,33 +781,9 @@ fn picker_label(meta: &OutputMeta) -> String {
     }
 }
 
-fn fill_rect(canvas: &mut Canvas<OpenGl>, x: f32, y: f32, w: f32, h: f32, paint: Paint) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    let mut path = Path::new();
-    path.rect(x, y, w, h);
-    canvas.fill_path(&path, &paint);
-}
 
-fn text_paint(font: femtovg::FontId, size: f32, color: Color) -> Paint {
-    let mut paint = Paint::color(color.fv()).with_font(&[font]).with_font_size(size);
-    paint.set_text_baseline(Baseline::Middle);
-    paint
-}
 
-fn text_width(canvas: &Canvas<OpenGl>, text: &str, paint: &Paint) -> f32 {
-    canvas.measure_text(0.0, 0.0, text, paint).map(|m| m.width()).unwrap_or(0.0)
-}
 
-fn card(canvas: &mut Canvas<OpenGl>, r: (f32, f32, f32, f32), radius: f32, fill: Color, border: Color) {
-    let mut path = Path::new();
-    path.rounded_rect(r.0, r.1, r.2, r.3, radius);
-    canvas.fill_path(&path, &Paint::color(fill.fv()));
-    let mut path = Path::new();
-    path.rounded_rect(r.0 + 0.5, r.1 + 0.5, r.2 - 1.0, r.3 - 1.0, radius);
-    canvas.stroke_path(&path, &Paint::color(border.fv()).with_line_width(1.0));
-}
 
 /// Size badge that follows the pointer, flipped to stay on screen.
 fn draw_badge(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, text: &str, p: (f32, f32), bounds: (f32, f32)) {
@@ -799,9 +850,9 @@ enum Item {
 }
 
 /// Noctalia's annotation toolbar: a rounded card centred at the top of each output.
-fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<Hit>, w: f32) -> (Vec<(Rect, Hit)>, Option<Rect>) {
+fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<Hit>, w: f32, current: &Fill, picker_open: bool) -> (Vec<(Rect, Hit)>, Option<Rect>) {
     use Item::*;
-    let items = [Button(Hit::RectangleTool), Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)];
+    let items = [Button(Hit::RectangleTool), Button(Hit::Color), Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)];
     let item_w = |item: &Item| match item {
         Button(_) => CONTROL_SM,
         Separator => 1.0,
@@ -826,6 +877,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<H
                 let (fill, fg) = match (hit, hover == Some(hit)) {
                     (Hit::RectangleTool, _) => (Some(t.primary), t.on_primary),
                     (_, true) => (Some(t.hover), t.on_hover),
+                    (Hit::Color, false) if picker_open => (Some(t.surface_variant), t.on_surface),
                     (Hit::Done, false) => (Some(t.primary), t.on_primary),
                     _ => (None, t.on_surface),
                 };
@@ -835,7 +887,13 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<H
                     canvas.fill_path(&path, &Paint::color(fill.fv()));
                 }
                 let pad = (CONTROL_SM - ICON) / 2.0;
-                draw_icon(canvas, hit, x + pad, y + pad, fg);
+                if hit == Hit::Color {
+                    // The button shows the current paint.
+                    let r = to_rect((x + pad, y + pad, ICON, ICON));
+                    crate::picker::swatch(canvas, r, current, false, t, matches!(current, Fill::Solid(_)));
+                } else {
+                    draw_icon(canvas, hit, x + pad, y + pad, fg);
+                }
                 buttons.push((to_rect((x, y, CONTROL_SM, CONTROL_SM)), hit));
             }
         }
@@ -878,7 +936,7 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             path.move_to(x + 12.0, y + 4.0);
             path.line_to(x + 4.0, y + 12.0);
         }
-        Hit::Output(_) => return,
+        Hit::Output(_) | Hit::Color => return,
     }
     let paint = Paint::color(color.fv())
         .with_line_width(1.75)

@@ -1,0 +1,134 @@
+//! Things shot-snap remembers between runs (not settings): `$XDG_STATE_HOME/shot-snap/state.toml`.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{xdg_dir, Color};
+use crate::geom::Rect;
+use crate::paint::{default_gradients, Fill, Gradient, DEFAULT_SOLIDS};
+
+pub const RECENT_LIMIT: usize = 10;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct State {
+    last_region: Option<[f64; 4]>,
+    pub annotate: AnnotateState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnnotateState {
+    /// What new shapes are painted with.
+    pub fill: Fill,
+    /// Most recent first. The built-in defaults are never listed here.
+    pub recent_solids: Vec<Color>,
+    pub recent_gradients: Vec<Gradient>,
+}
+
+impl AnnotateState {
+    /// Records the current fill as a recent pick, unless it's one of the defaults.
+    pub fn remember_fill(&mut self) {
+        match &self.fill {
+            Fill::Solid(c) if !DEFAULT_SOLIDS.contains(c) => push_recent(&mut self.recent_solids, *c),
+            Fill::Gradient(g) => {
+                let g = g.normalized();
+                if !default_gradients().contains(&g) {
+                    push_recent(&mut self.recent_gradients, g);
+                }
+            }
+            Fill::Solid(_) => {}
+        }
+    }
+}
+
+fn push_recent<T: PartialEq>(list: &mut Vec<T>, item: T) {
+    list.retain(|x| *x != item);
+    list.insert(0, item);
+    list.truncate(RECENT_LIMIT);
+}
+
+fn path() -> PathBuf {
+    xdg_dir("XDG_STATE_HOME", ".local/state").join("shot-snap/state.toml")
+}
+
+/// A missing or unreadable state file just means starting fresh.
+pub fn load() -> State {
+    let mut state: State = std::fs::read_to_string(path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
+    let a = &mut state.annotate;
+    a.recent_solids.truncate(RECENT_LIMIT);
+    a.recent_gradients.retain(|g| g.stops.len() >= 2);
+    a.recent_gradients.truncate(RECENT_LIMIT);
+    if matches!(&a.fill, Fill::Gradient(g) if g.stops.len() < 2) {
+        a.fill = Fill::default();
+    }
+    state
+}
+
+pub fn save(state: &State) {
+    let path = path();
+    let result = toml::to_string(state)
+        .map_err(std::io::Error::other)
+        .and_then(|text| {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, text)
+        });
+    if let Err(e) = result {
+        log::warn!("could not save state to {}: {e}", path.display());
+    }
+}
+
+pub fn last_region() -> Option<Rect> {
+    load().last_region.map(|[x, y, w, h]| Rect { x, y, w, h })
+}
+
+pub fn save_last_region(rect: Rect) {
+    let mut state = load();
+    state.last_region = Some([rect.x, rect.y, rect.w, rect.h]);
+    save(&state);
+}
+
+pub fn save_annotate(annotate: AnnotateState) {
+    let mut state = load();
+    state.annotate = annotate;
+    save(&state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recents_dedupe_cap_and_skip_defaults() {
+        let mut a = AnnotateState { fill: Fill::Solid(DEFAULT_SOLIDS[1]), ..Default::default() };
+        a.remember_fill();
+        assert!(a.recent_solids.is_empty());
+        for i in 0..12 {
+            a.fill = Fill::Solid(Color { r: i as f32 / 20.0, g: 0.0, b: 0.0, a: 1.0 });
+            a.remember_fill();
+        }
+        assert_eq!(a.recent_solids.len(), RECENT_LIMIT);
+        let again = a.recent_solids[5];
+        a.fill = Fill::Solid(again);
+        a.remember_fill();
+        assert_eq!(a.recent_solids[0], again);
+        assert_eq!(a.recent_solids.iter().filter(|c| **c == again).count(), 1);
+    }
+
+    #[test]
+    fn state_round_trips_through_toml() {
+        let mut state = State { last_region: Some([1.0, 2.0, 3.0, 4.0]), ..Default::default() };
+        state.annotate.fill = Fill::Gradient(default_gradients()[2].clone());
+        state.annotate.recent_solids = vec![DEFAULT_SOLIDS[3]];
+        state.annotate.recent_gradients = vec![default_gradients()[0].clone()];
+        let text = toml::to_string(&state).unwrap();
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.last_region, state.last_region);
+        assert_eq!(back.annotate.recent_solids.len(), 1);
+        assert_eq!(back.annotate.recent_gradients, state.annotate.recent_gradients);
+        assert!(matches!(back.annotate.fill, Fill::Gradient(_)));
+    }
+}

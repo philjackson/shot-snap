@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::geom::Rect;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -96,12 +95,33 @@ impl Color {
         }
     }
 
+    /// Rounded to 8 bits per channel, which is what the state file stores.
+    pub fn quantized(self) -> Self {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+        Self { r: q(self.r), g: q(self.g), b: q(self.b), a: q(self.a) }
+    }
+
+    pub fn to_hex(self) -> String {
+        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if b(self.a) == 255 {
+            format!("#{:02x}{:02x}{:02x}", b(self.r), b(self.g), b(self.b))
+        } else {
+            format!("#{:02x}{:02x}{:02x}{:02x}", b(self.r), b(self.g), b(self.b), b(self.a))
+        }
+    }
+
     pub fn with_alpha(self, a: f32) -> Self {
         Self { a, ..self }
     }
 
     pub fn fv(self) -> femtovg::Color {
         femtovg::Color::rgbaf(self.r, self.g, self.b, self.a)
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
     }
 }
 
@@ -116,7 +136,7 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+pub fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     match std::env::var_os(var) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => home().join(fallback),
@@ -135,10 +155,6 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 
 pub fn config_path() -> PathBuf {
     xdg_dir("XDG_CONFIG_HOME", ".config").join("shot-snap/config.toml")
-}
-
-fn state_path() -> PathBuf {
-    xdg_dir("XDG_STATE_HOME", ".local/state").join("shot-snap/state.toml")
 }
 
 impl Config {
@@ -185,28 +201,4 @@ fn pictures_from_user_dirs() -> Option<PathBuf> {
     let value = line["XDG_PICTURES_DIR=".len()..].trim_matches('"');
     let value = value.replace("$HOME", &home().to_string_lossy());
     Some(PathBuf::from(value))
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct State {
-    last_region: Option<[f64; 4]>,
-}
-
-pub fn load_last_region() -> Option<Rect> {
-    let text = std::fs::read_to_string(state_path()).ok()?;
-    let state: State = toml::from_str(&text).ok()?;
-    state.last_region.map(|[x, y, w, h]| Rect { x, y, w, h })
-}
-
-pub fn save_last_region(rect: Rect) {
-    let path = state_path();
-    let state = State { last_region: Some([rect.x, rect.y, rect.w, rect.h]) };
-    let result = path
-        .parent()
-        .map(std::fs::create_dir_all)
-        .transpose()
-        .and_then(|_| std::fs::write(&path, toml::to_string(&state).unwrap_or_default()));
-    if let Err(e) = result {
-        log::warn!("could not save last region to {}: {e}", path.display());
-    }
 }
