@@ -70,6 +70,7 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
 | Ctrl+Z / ↶ | Undo the last annotation |
+| Ctrl+Shift+Z or Ctrl+Y / ↷ | Redo (until you draw something new) |
 | `s` / `a` / `t` / `h` / `u` / `n` | Rectangle / arrow / text / highlight / blur / numbering tool |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
@@ -85,7 +86,7 @@ shadow blur / opacity / X and Y offset are sliders (in image pixels; defaults 64
 
 #### Toolbar
 
-Undo · Rectangle, arrow, text, highlight, blur, numbering, colour · S / M / L sizes (½×, 1×, 2× the
+Undo, redo · Rectangle, arrow, text, highlight, blur, numbering, colour · S / M / L sizes (½×, 1×, 2× the
 tool's default: 6px strokes, 24px text, 32px markers; hidden for highlight and blur) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
 tooltip. The style button (✦) sits just before Copy. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine

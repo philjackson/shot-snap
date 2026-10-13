@@ -87,6 +87,7 @@ const LONG_PRESS: Duration = Duration::from_millis(400);
 enum Hit {
     Output(u32),
     Undo,
+    Redo,
     Tool(Tool),
     ArrowHeads(ArrowHeads),
     /// Index into `HIGHLIGHT_COLORS`.
@@ -192,6 +193,8 @@ pub struct Overlay {
     /// The pointer is over a toolbar card, so presses don't draw.
     over_toolbar: bool,
     annotations: Vec<Annotation>,
+    /// Undone annotations, most recent last. Cleared when something new is added.
+    redo: Vec<Annotation>,
     editor: Option<Editor>,
     picker: Option<Picker>,
     style_panel: StylePanel,
@@ -257,6 +260,7 @@ impl Overlay {
             hover_button: None,
             over_toolbar: false,
             annotations: Vec::new(),
+            redo: Vec::new(),
             editor: None,
             picker: None,
             style_panel: StylePanel::default(),
@@ -377,13 +381,21 @@ impl Overlay {
         self.editing = Some(self.annotations.len() - 1);
     }
 
-    /// Ends text entry, dropping it if nothing was typed.
+    /// Ends text entry, dropping it if nothing was typed. Typed text counts as a new annotation.
     fn commit_text(&mut self) {
-        if let Some(i) = self.editing.take()
-            && matches!(&self.annotations.get(i), Some(Annotation { kind: Kind::Text { text, .. }, .. }) if text.is_empty())
-        {
-            self.annotations.remove(i);
+        if let Some(i) = self.editing.take() {
+            if matches!(&self.annotations.get(i), Some(Annotation { kind: Kind::Text { text, .. }, .. }) if text.is_empty()) {
+                self.annotations.remove(i);
+            } else {
+                self.redo.clear();
+            }
         }
+    }
+
+    /// A finished new annotation: what was undone can't be redone after this.
+    fn add(&mut self, shape: Annotation) {
+        self.annotations.push(shape);
+        self.redo.clear();
     }
 
     fn cancel_text(&mut self) {
@@ -416,7 +428,16 @@ impl Overlay {
 
     fn undo(&mut self) {
         self.commit_text();
-        self.annotations.pop();
+        if let Some(shape) = self.annotations.pop() {
+            self.redo.push(shape);
+        }
+    }
+
+    fn redo(&mut self) {
+        self.commit_text();
+        if let Some(shape) = self.redo.pop() {
+            self.annotations.push(shape);
+        }
     }
 
     fn style(&self) -> Style {
@@ -729,6 +750,10 @@ impl Overlay {
                     self.undo();
                     None
                 }
+                Some(Hit::Redo) => {
+                    self.redo();
+                    None
+                }
                 Some(Hit::SizePreset(i)) => {
                     self.set_tool_width(self.tool.default_width() * SIZE_PRESETS[i]);
                     None
@@ -770,7 +795,7 @@ impl Overlay {
                         Some(ip) if self.tool == Tool::Number => {
                             self.commit_text();
                             let shape = Annotation { kind: Kind::Number { at: ip }, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
-                            self.annotations.push(shape);
+                            self.add(shape);
                         }
                         Some(ip) => {
                             self.commit_text();
@@ -800,7 +825,7 @@ impl Overlay {
                     let end = self.clamp_image(ip);
                     if let Some(kind) = self.shape_for(anchor, end) {
                         let shape = Annotation { kind, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
-                        self.annotations.push(shape);
+                        self.add(shape);
                     }
                 }
                 None
@@ -929,6 +954,11 @@ impl Overlay {
                 Keysym::Return | Keysym::KP_Enter if !mods.ctrl => Some(self.annotated(Action::Default)),
                 Keysym::c | Keysym::C if mods.ctrl => Some(self.annotated(Action::Copy)),
                 Keysym::s | Keysym::S if mods.ctrl => Some(self.annotated(Action::Save)),
+                Keysym::z | Keysym::Z | Keysym::y | Keysym::Y if mods.ctrl && (mods.shift || matches!(keysym, Keysym::y | Keysym::Y)) => {
+                    self.redo();
+                    self.redraw_all(qh);
+                    None
+                }
                 Keysym::z | Keysym::Z if mods.ctrl => {
                     self.undo();
                     self.redraw_all(qh);
@@ -1072,6 +1102,7 @@ impl Overlay {
             hover: self.hover_button,
             picker_open,
             can_undo: !self.annotations.is_empty(),
+            can_redo: !self.redo.is_empty(),
             tool: self.tool,
             width: tool_width,
             advanced: self.advanced_size(),
@@ -1362,6 +1393,7 @@ struct ToolbarState {
     hover: Option<Hit>,
     picker_open: bool,
     can_undo: bool,
+    can_redo: bool,
     tool: Tool,
     width: f64,
     advanced: bool,
@@ -1380,6 +1412,7 @@ const DISABLED_ALPHA: f32 = 0.55;
 fn tooltip_text(hit: Hit) -> Option<&'static str> {
     Some(match hit {
         Hit::Undo => "Undo (Ctrl+Z)",
+        Hit::Redo => "Redo (Ctrl+Shift+Z)",
         Hit::Tool(Tool::Rectangle) => "Rectangle (s)",
         Hit::Tool(Tool::Arrow) => "Arrow (a) · hold to choose the ends",
         Hit::Tool(Tool::Text) => "Text (t) · click to type, Enter to finish",
@@ -1407,6 +1440,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
     use Item::*;
     let mut items = vec![
         Button(Hit::Undo),
+        Button(Hit::Redo),
         Separator,
         Button(Hit::Tool(Tool::Rectangle)),
         Button(Hit::Tool(Tool::Arrow)),
@@ -1481,7 +1515,11 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
                 }
             }
             Button(hit) => {
-                let enabled = hit != Hit::Undo || st.can_undo;
+                let enabled = match hit {
+                    Hit::Undo => st.can_undo,
+                    Hit::Redo => st.can_redo,
+                    _ => true,
+                };
                 // The selected tool and Done (the primary action) are filled.
                 let (fill, fg) = match (hit, st.hover == Some(hit) && enabled) {
                     (Hit::Tool(tool), _) if tool == st.tool => (Some(t.primary), t.on_primary),
@@ -1691,6 +1729,16 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             path.line_to(x + 10.5, y + 6.5);
             path.bezier_to(x + 14.5, y + 6.5, x + 14.5, y + 12.5, x + 10.5, y + 12.5);
             path.line_to(x + 9.5, y + 12.5);
+        }
+        Hit::Redo => {
+            // Tabler arrow-forward-up: the undo arrow mirrored.
+            path.move_to(x + 10.0, y + 9.5);
+            path.line_to(x + 13.0, y + 6.5);
+            path.line_to(x + 10.0, y + 3.5);
+            path.move_to(x + 13.0, y + 6.5);
+            path.line_to(x + 5.5, y + 6.5);
+            path.bezier_to(x + 1.5, y + 6.5, x + 1.5, y + 12.5, x + 5.5, y + 12.5);
+            path.line_to(x + 6.5, y + 12.5);
         }
         Hit::SizeAdvanced => {
             // Tabler adjustments-horizontal: three sliders.
