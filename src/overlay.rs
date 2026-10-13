@@ -17,7 +17,7 @@ use wayland_client::QueueHandle;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-use crate::annotate::{self, Shape as Annotation};
+use crate::annotate::{Shape as Annotation, Tool, SIZE_PRESETS};
 use crate::app::App;
 use crate::capture::{NoEvents, OutputMeta};
 use crate::config::{Color, Theme};
@@ -70,8 +70,13 @@ pub enum Outcome {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Hit {
     Output(u32),
+    Undo,
     RectangleTool,
     Color,
+    SizePreset(usize),
+    SizeAdvanced,
+    SizeDown,
+    SizeUp,
     Copy,
     Save,
     Done,
@@ -155,6 +160,12 @@ pub struct Overlay {
     annotations: Vec<Annotation>,
     editor: Option<Editor>,
     picker: Option<Picker>,
+    tool: Tool,
+    /// Toolbar button whose tooltip is showing, and a counter that invalidates pending tooltip
+    /// timers whenever the hovered button changes.
+    tooltip: Option<Hit>,
+    hover_gen: u64,
+    tooltip_request: Option<u64>,
     theme: Theme,
     hidden: bool,
 }
@@ -207,6 +218,10 @@ impl Overlay {
             annotations: Vec::new(),
             editor: None,
             picker: None,
+            tool: Tool::Rectangle,
+            tooltip: None,
+            hover_gen: 0,
+            tooltip_request: None,
             theme,
             hidden: false,
         }
@@ -223,6 +238,38 @@ impl Overlay {
     /// The colour panel's state to persist, with the current pick recorded.
     pub fn take_annotate_state(&mut self) -> Option<AnnotateState> {
         self.picker.take().map(Picker::finish)
+    }
+
+    /// After a hover change: the generation a tooltip timer should be started for.
+    pub fn take_tooltip_request(&mut self) -> Option<u64> {
+        self.tooltip_request.take()
+    }
+
+    /// Tooltip timer fired: show it if the pointer is still on the same button.
+    pub fn show_tooltip(&mut self, generation: u64, qh: &QueueHandle<App>) {
+        if generation == self.hover_gen && self.drag == Drag::None && self.hover_button.is_some_and(|h| tooltip_text(h).is_some()) {
+            self.tooltip = self.hover_button;
+            self.redraw_all(qh);
+        }
+    }
+
+    fn tool_width(&self) -> f64 {
+        self.picker.as_ref().map_or(self.tool.default_width(), |p| p.state().width(self.tool))
+    }
+
+    fn set_tool_width(&mut self, width: f64) {
+        let tool = self.tool;
+        if let Some(p) = &mut self.picker {
+            p.state_mut().set_width(tool, width);
+        }
+    }
+
+    fn advanced_size(&self) -> bool {
+        self.picker.as_ref().is_some_and(|p| p.state().advanced_size)
+    }
+
+    fn undo(&mut self) {
+        self.annotations.pop();
     }
 
     fn picker_open(&self) -> bool {
@@ -426,7 +473,13 @@ impl Overlay {
         }
         if self.drag == Drag::None {
             let s = &self.surfs[i];
-            self.hover_button = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
+            let hover = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
+            if hover != self.hover_button {
+                self.hover_gen += 1;
+                self.tooltip = None;
+                self.tooltip_request = hover.and_then(tooltip_text).map(|_| self.hover_gen);
+            }
+            self.hover_button = hover;
             // The colour panel counts as toolbar: it's chrome, not canvas.
             self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos)) || self.picker.as_ref().is_some_and(|pk| pk.contains(pos));
             if self.over_toolbar && self.picker.as_ref().is_some_and(|pk| pk.contains(pos)) {
@@ -441,6 +494,10 @@ impl Overlay {
             return None;
         }
         let p = self.pointer?;
+        if pressed {
+            self.tooltip = None;
+            self.hover_gen += 1;
+        }
         let outcome = match (self.mode, pressed) {
             (Mode::Picker, true) => {
                 let id = match self.hover_button {
@@ -456,6 +513,28 @@ impl Overlay {
                     if let Some(picker) = &mut self.picker {
                         picker.toggle();
                     }
+                    None
+                }
+                Some(Hit::Undo) => {
+                    self.undo();
+                    None
+                }
+                Some(Hit::SizePreset(i)) => {
+                    self.set_tool_width(self.tool.default_width() * SIZE_PRESETS[i]);
+                    None
+                }
+                Some(Hit::SizeAdvanced) => {
+                    if let Some(p) = &mut self.picker {
+                        p.state_mut().advanced_size ^= true;
+                    }
+                    None
+                }
+                Some(Hit::SizeDown) => {
+                    self.set_tool_width(self.tool_width() - 1.0);
+                    None
+                }
+                Some(Hit::SizeUp) => {
+                    self.set_tool_width(self.tool_width() + 1.0);
                     None
                 }
                 Some(Hit::Copy) => return Some(self.annotated(Action::Copy)),
@@ -488,7 +567,7 @@ impl Overlay {
                     // Ignore clicks: the rectangle must be at least a couple of logical pixels.
                     if rect.w >= MIN_SELECTION * scale && rect.h >= MIN_SELECTION * scale {
                         let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                        self.annotations.push(Annotation { rect, width: annotate::DEFAULT_WIDTH * scale, fill });
+                        self.annotations.push(Annotation { rect, width: self.tool_width() * scale, fill });
                     }
                 }
                 None
@@ -548,7 +627,13 @@ impl Overlay {
                 Keysym::c | Keysym::C if mods.ctrl => Some(self.annotated(Action::Copy)),
                 Keysym::s | Keysym::S if mods.ctrl => Some(self.annotated(Action::Save)),
                 Keysym::z | Keysym::Z if mods.ctrl => {
-                    self.annotations.pop();
+                    self.undo();
+                    self.redraw_all(qh);
+                    None
+                }
+                Keysym::bracketleft | Keysym::bracketright if !mods.ctrl => {
+                    let step = if keysym == Keysym::bracketleft { -1.0 } else { 1.0 };
+                    self.set_tool_width(self.tool_width() + step);
                     self.redraw_all(qh);
                     None
                 }
@@ -629,6 +714,16 @@ impl Overlay {
             self.layout_editor(i);
         }
         let picker_open = self.picker_open();
+        let tool_width = self.tool_width();
+        let toolbar_state = ToolbarState {
+            hover: self.hover_button,
+            picker_open,
+            can_undo: !self.annotations.is_empty(),
+            tool: self.tool,
+            width: tool_width,
+            advanced: self.advanced_size(),
+        };
+        let tooltip = self.tooltip.and_then(tooltip_text);
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
 
         let s = &mut self.surfs[i];
@@ -718,7 +813,7 @@ impl Overlay {
                     canvas.save();
                     canvas.scissor(cx, cy, cw, ch);
                     let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                    let preview = drawing.map(|rect| Annotation { rect, width: annotate::DEFAULT_WIDTH * e.scale, fill });
+                    let preview = drawing.map(|rect| Annotation { rect, width: tool_width * e.scale, fill });
                     let to_local = |r: Rect| Rect { x: c.x + r.x / e.fit, y: c.y + r.y / e.fit, w: r.w / e.fit, h: r.h / e.fit };
                     for shape in self.annotations.iter().chain(preview.as_ref()) {
                         let r = to_local(shape.rect);
@@ -734,10 +829,14 @@ impl Overlay {
                     canvas.stroke_path(&path, &Paint::color(t.outline.fv()).with_line_width(1.0));
                 }
                 let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, self.hover_button, w, &fill, picker_open);
+                (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, font, w, &fill, &toolbar_state);
                 let anchor = s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).map(|(r, _)| *r);
                 if let (Some(picker), Some(anchor), Some(bar)) = (self.picker.as_mut().filter(|p| p.open), anchor, s.toolbar) {
                     picker.draw(canvas, font, t, anchor, (bar.bottom() as f32) + SPACE_SM, w);
+                }
+                let target = self.tooltip.and_then(|hit| s.buttons.iter().find(|(_, h)| *h == hit)).map(|(r, _)| *r);
+                if let (Some(text), Some(target), Some(bar), Some(font)) = (tooltip, target, s.toolbar, font) {
+                    draw_tooltip(canvas, font, t, text, target, bar.bottom() as f32 + 6.0, w);
                 }
             }
         }
@@ -847,15 +946,57 @@ fn to_rect(r: (f32, f32, f32, f32)) -> Rect {
 enum Item {
     Button(Hit),
     Separator,
+    /// S / M / L as one segmented control.
+    Presets,
+    SizeLabel,
+}
+
+struct ToolbarState {
+    hover: Option<Hit>,
+    picker_open: bool,
+    can_undo: bool,
+    tool: Tool,
+    width: f64,
+    advanced: bool,
+}
+
+const PRESET_W: f32 = 26.0;
+const SIZE_LABEL_W: f32 = 30.0;
+const DISABLED_ALPHA: f32 = 0.55;
+
+/// Noctalia's wording; shortcuts in brackets.
+fn tooltip_text(hit: Hit) -> Option<&'static str> {
+    Some(match hit {
+        Hit::Undo => "Undo (Ctrl+Z)",
+        Hit::RectangleTool => "Rectangle",
+        Hit::Color => "Colour or gradient",
+        Hit::SizePreset(0) => "Small",
+        Hit::SizePreset(1) => "Medium",
+        Hit::SizePreset(_) => "Large",
+        Hit::SizeAdvanced => "Fine size adjustment",
+        Hit::SizeDown => "Thinner ([)",
+        Hit::SizeUp => "Thicker (])",
+        Hit::Copy => "Copy the annotated image (Ctrl+C)",
+        Hit::Save => "Save the annotated image (Ctrl+S)",
+        Hit::Done => "Apply the screenshot settings (Enter)",
+        Hit::Close => "Close without delivering (Esc)",
+        Hit::Output(_) => return None,
+    })
 }
 
 /// Noctalia's annotation toolbar: a rounded card centred at the top of each output.
-fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<Hit>, w: f32, current: &Fill, picker_open: bool) -> (Vec<(Rect, Hit)>, Option<Rect>) {
+fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<femtovg::FontId>, w: f32, current: &Fill, st: &ToolbarState) -> (Vec<(Rect, Hit)>, Option<Rect>) {
     use Item::*;
-    let items = [Button(Hit::RectangleTool), Button(Hit::Color), Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)];
+    let mut items = vec![Button(Hit::Undo), Separator, Button(Hit::RectangleTool), Button(Hit::Color), Separator, Presets, Button(Hit::SizeAdvanced)];
+    if st.advanced {
+        items.extend([Button(Hit::SizeDown), SizeLabel, Button(Hit::SizeUp)]);
+    }
+    items.extend([Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)]);
     let item_w = |item: &Item| match item {
         Button(_) => CONTROL_SM,
         Separator => 1.0,
+        Presets => PRESET_W * 3.0,
+        SizeLabel => SIZE_LABEL_W,
     };
     let content_w: f32 = items.iter().map(item_w).sum::<f32>() + SPACE_SM * (items.len() - 1) as f32;
     let (card_w, card_h) = (content_w + SPACE_MD * 2.0, CONTROL_SM + SPACE_SM * 2.0);
@@ -863,6 +1004,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<H
     let y0 = SPACE_MD;
     card(canvas, (x0, y0, card_w, card_h), RADIUS_XL, t.surface.with_alpha(TOOLBAR_FILL_ALPHA), t.outline);
 
+    let preset = SIZE_PRESETS.iter().position(|m| (st.tool.default_width() * m - st.width).abs() < 1e-6);
     let mut buttons = Vec::new();
     let mut x = x0 + SPACE_MD;
     let y = y0 + SPACE_SM;
@@ -872,13 +1014,48 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<H
                 let h = CONTROL_SM * 0.6;
                 fill_rect(canvas, x, y + (CONTROL_SM - h) / 2.0, 1.0, h, Paint::color(t.outline.fv()));
             }
+            Presets => {
+                let (sy, sh) = (y + 2.0, CONTROL_SM - 4.0);
+                card(canvas, (x, sy, PRESET_W * 3.0, sh), RADIUS_MD, t.surface_variant, t.outline);
+                for (i, label) in ["S", "M", "L"].into_iter().enumerate() {
+                    let hit = Hit::SizePreset(i);
+                    let bx = x + PRESET_W * i as f32;
+                    let (fill, fg) = match (preset == Some(i), st.hover == Some(hit)) {
+                        (true, _) => (Some(t.primary), t.on_primary),
+                        (false, true) => (Some(t.hover), t.on_hover),
+                        _ => (None, t.on_surface),
+                    };
+                    if let Some(fill) = fill {
+                        let mut path = Path::new();
+                        path.rounded_rect(bx + 2.0, sy + 2.0, PRESET_W - 4.0, sh - 4.0, RADIUS_MD - 2.0);
+                        canvas.fill_path(&path, &Paint::color(fill.fv()));
+                    }
+                    if let Some(font) = font {
+                        let paint = text_paint(font, CAPTION_FONT, fg);
+                        let tw = text_width(canvas, label, &paint);
+                        let _ = canvas.fill_text(bx + (PRESET_W - tw) / 2.0, sy + sh / 2.0, label, &paint);
+                    }
+                    buttons.push((to_rect((bx, sy, PRESET_W, sh)), hit));
+                }
+            }
+            SizeLabel => {
+                if let Some(font) = font {
+                    let paint = text_paint(font, CAPTION_FONT, t.on_surface);
+                    let label = format!("{}", st.width.round() as i64);
+                    let tw = text_width(canvas, &label, &paint);
+                    let _ = canvas.fill_text(x + (SIZE_LABEL_W - tw) / 2.0, y + CONTROL_SM / 2.0, &label, &paint);
+                }
+            }
             Button(hit) => {
+                let enabled = hit != Hit::Undo || st.can_undo;
                 // The only tool is always selected; Done is the primary action.
-                let (fill, fg) = match (hit, hover == Some(hit)) {
+                let (fill, fg) = match (hit, st.hover == Some(hit) && enabled) {
                     (Hit::RectangleTool, _) => (Some(t.primary), t.on_primary),
                     (_, true) => (Some(t.hover), t.on_hover),
-                    (Hit::Color, false) if picker_open => (Some(t.surface_variant), t.on_surface),
+                    (Hit::Color, false) if st.picker_open => (Some(t.surface_variant), t.on_surface),
+                    (Hit::SizeAdvanced, false) if st.advanced => (Some(t.surface_variant), t.on_surface),
                     (Hit::Done, false) => (Some(t.primary), t.on_primary),
+                    _ if !enabled => (None, t.on_surface.with_alpha(DISABLED_ALPHA)),
                     _ => (None, t.on_surface),
                 };
                 if let Some(fill) = fill {
@@ -900,6 +1077,16 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<H
         x += item_w(item) + SPACE_SM;
     }
     (buttons, Some(to_rect((x0, y0, card_w, card_h))))
+}
+
+/// A caption card under the hovered toolbar button, kept on screen.
+fn draw_tooltip(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, text: &str, target: Rect, top: f32, w: f32) {
+    let paint = text_paint(font, CAPTION_FONT, t.on_surface);
+    let tw = text_width(canvas, text, &paint);
+    let (cw, ch) = (tw + SPACE_MD * 2.0, CAPTION_FONT * 1.3 + SPACE_SM * 2.0);
+    let x = ((target.x + target.w / 2.0) as f32 - cw / 2.0).clamp(4.0, (w - cw - 4.0).max(4.0)).round();
+    card(canvas, (x, top, cw, ch), RADIUS_MD, t.surface.with_alpha(0.96), t.outline);
+    let _ = canvas.fill_text(x + SPACE_MD, top + ch / 2.0, text, &paint);
 }
 
 /// Line icons in a 16×16 box, after the Tabler glyphs Noctalia uses.
@@ -936,7 +1123,37 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             path.move_to(x + 12.0, y + 4.0);
             path.line_to(x + 4.0, y + 12.0);
         }
-        Hit::Output(_) | Hit::Color => return,
+        Hit::Undo => {
+            // Tabler arrow-back-up.
+            path.move_to(x + 6.0, y + 9.5);
+            path.line_to(x + 3.0, y + 6.5);
+            path.line_to(x + 6.0, y + 3.5);
+            path.move_to(x + 3.0, y + 6.5);
+            path.line_to(x + 10.5, y + 6.5);
+            path.bezier_to(x + 14.5, y + 6.5, x + 14.5, y + 12.5, x + 10.5, y + 12.5);
+            path.line_to(x + 9.5, y + 12.5);
+        }
+        Hit::SizeAdvanced => {
+            // Tabler adjustments-horizontal: three sliders.
+            for (ly, kx) in [(4.0, 10.0), (8.0, 5.0), (12.0, 11.0)] {
+                path.move_to(x + 2.0, y + ly);
+                path.line_to(x + kx - 2.0, y + ly);
+                path.move_to(x + kx + 2.0, y + ly);
+                path.line_to(x + 14.0, y + ly);
+                path.circle(x + kx, y + ly, 2.0);
+            }
+        }
+        Hit::SizeDown => {
+            path.move_to(x + 4.0, y + 8.0);
+            path.line_to(x + 12.0, y + 8.0);
+        }
+        Hit::SizeUp => {
+            path.move_to(x + 4.0, y + 8.0);
+            path.line_to(x + 12.0, y + 8.0);
+            path.move_to(x + 8.0, y + 4.0);
+            path.line_to(x + 8.0, y + 12.0);
+        }
+        Hit::Output(_) | Hit::Color | Hit::SizePreset(_) => return,
     }
     let paint = Paint::color(color.fv())
         .with_line_width(1.75)

@@ -41,6 +41,7 @@ use crate::overlay::{self, Outcome, Overlay};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const HIDE_TIMEOUT: Duration = Duration::from_millis(250);
+const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy)]
 enum Area {
@@ -503,6 +504,18 @@ impl App {
         metas
     }
 
+    /// Tooltips appear after the pointer rests on a toolbar button for a moment, as in Noctalia.
+    fn schedule_tooltip(&mut self) {
+        let Some(generation) = self.overlay.as_mut().and_then(Overlay::take_tooltip_request) else { return };
+        let _ = self.handle.insert_source(Timer::from_duration(TOOLTIP_DELAY), move |_, _, app: &mut App| {
+            let qh = app.qh.clone();
+            if let Some(overlay) = &mut app.overlay {
+                overlay.show_tooltip(generation, &qh);
+            }
+            TimeoutAction::Drop
+        });
+    }
+
     fn update_cursor(&mut self) {
         let (Some(overlay), Some(device), Some(serial)) = (&self.overlay, &self.cursor_device, self.pointer_serial) else { return };
         let shape = overlay.cursor();
@@ -658,6 +671,7 @@ impl PointerHandler for App {
                 None => self.update_cursor(),
             }
         }
+        self.schedule_tooltip();
     }
 }
 

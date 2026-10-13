@@ -118,6 +118,15 @@ impl Picker {
         &self.state.fill
     }
 
+    /// The whole annotation state; the editor keeps tool widths in it too.
+    pub fn state(&self) -> &AnnotateState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut AnnotateState {
+        &mut self.state
+    }
+
     pub fn toggle(&mut self) {
         if self.open {
             self.close();

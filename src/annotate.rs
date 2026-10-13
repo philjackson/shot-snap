@@ -6,6 +6,30 @@ use crate::paint::Fill;
 
 /// Noctalia's default shape weight.
 pub const DEFAULT_WIDTH: f64 = 6.0;
+pub const MIN_WIDTH: f64 = 1.0;
+pub const MAX_WIDTH: f64 = 100.0;
+/// S / M / L multiply the tool's default width, as in Noctalia.
+pub const SIZE_PRESETS: [f64; 3] = [0.5, 1.0, 2.0];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Rectangle,
+}
+
+impl Tool {
+    /// Key in the state file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Rectangle => "rectangle",
+        }
+    }
+
+    pub fn default_width(self) -> f64 {
+        match self {
+            Tool::Rectangle => DEFAULT_WIDTH,
+        }
+    }
+}
 
 /// A stroked rectangle. `rect` is the stroke's centre line and `width` its weight, both in the
 /// coordinates of the image being annotated. Gradients span the stroke's outer bounds.

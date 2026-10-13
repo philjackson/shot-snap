@@ -1,9 +1,11 @@
 //! Things shot-snap remembers between runs (not settings): `$XDG_STATE_HOME/shot-snap/state.toml`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::annotate::{Tool, MAX_WIDTH, MIN_WIDTH};
 use crate::config::{xdg_dir, Color};
 use crate::geom::Rect;
 use crate::paint::{default_gradients, Fill, Gradient, DEFAULT_SOLIDS};
@@ -25,9 +27,21 @@ pub struct AnnotateState {
     /// Most recent first. The built-in defaults are never listed here.
     pub recent_solids: Vec<Color>,
     pub recent_gradients: Vec<Gradient>,
+    /// Stroke width per tool, in logical pixels.
+    pub tool_widths: BTreeMap<String, f64>,
+    /// The fine size stepper is showing.
+    pub advanced_size: bool,
 }
 
 impl AnnotateState {
+    pub fn width(&self, tool: Tool) -> f64 {
+        self.tool_widths.get(tool.name()).copied().unwrap_or(tool.default_width())
+    }
+
+    pub fn set_width(&mut self, tool: Tool, width: f64) {
+        self.tool_widths.insert(tool.name().into(), width.clamp(MIN_WIDTH, MAX_WIDTH));
+    }
+
     /// Records the current fill as a recent pick, unless it's one of the defaults.
     pub fn remember_fill(&mut self) {
         match &self.fill {
@@ -130,5 +144,17 @@ mod tests {
         assert_eq!(back.annotate.recent_solids.len(), 1);
         assert_eq!(back.annotate.recent_gradients, state.annotate.recent_gradients);
         assert!(matches!(back.annotate.fill, Fill::Gradient(_)));
+    }
+
+    #[test]
+    fn tool_widths_default_and_clamp() {
+        let mut a = AnnotateState::default();
+        assert_eq!(a.width(Tool::Rectangle), 6.0);
+        a.set_width(Tool::Rectangle, 500.0);
+        assert_eq!(a.width(Tool::Rectangle), MAX_WIDTH);
+        a.set_width(Tool::Rectangle, 0.0);
+        assert_eq!(a.width(Tool::Rectangle), MIN_WIDTH);
+        let back: State = toml::from_str(&toml::to_string(&State { annotate: a, ..Default::default() }).unwrap()).unwrap();
+        assert_eq!(back.annotate.width(Tool::Rectangle), MIN_WIDTH);
     }
 }

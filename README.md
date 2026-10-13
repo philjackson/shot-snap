@@ -52,8 +52,16 @@ the editor closes.
 | Enter / ✓ | Done: use the configured outputs |
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
-| Ctrl+Z | Undo the last rectangle |
+| Ctrl+Z / ↶ | Undo the last rectangle |
+| `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
+
+#### Toolbar
+
+Undo · Rectangle, colour · S / M / L sizes (½×, 1×, 2× the tool's default 6px) · fine size
+adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
+tooltip. Each tool remembers its own width, and the fine stepper stays shown or hidden between
+runs (both in the state file).
 
 #### Colours and gradients
 
