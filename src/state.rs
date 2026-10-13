@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::annotate::{Tool, MAX_WIDTH, MIN_WIDTH};
+use crate::annotate::{ArrowHeads, Tool};
 use crate::config::{xdg_dir, Color};
 use crate::geom::Rect;
 use crate::paint::{default_gradients, Fill, Gradient, DEFAULT_SOLIDS};
@@ -31,6 +31,9 @@ pub struct AnnotateState {
     pub tool_widths: BTreeMap<String, f64>,
     /// The fine size stepper is showing.
     pub advanced_size: bool,
+    /// Selected tool, and which ends arrows get heads on.
+    pub tool: Tool,
+    pub arrow_heads: ArrowHeads,
 }
 
 impl AnnotateState {
@@ -39,7 +42,8 @@ impl AnnotateState {
     }
 
     pub fn set_width(&mut self, tool: Tool, width: f64) {
-        self.tool_widths.insert(tool.name().into(), width.clamp(MIN_WIDTH, MAX_WIDTH));
+        let (min, max) = tool.width_range();
+        self.tool_widths.insert(tool.name().into(), width.clamp(min, max));
     }
 
     /// Records the current fill as a recent pick, unless it's one of the defaults.
@@ -150,11 +154,17 @@ mod tests {
     fn tool_widths_default_and_clamp() {
         let mut a = AnnotateState::default();
         assert_eq!(a.width(Tool::Rectangle), 6.0);
+        assert_eq!(a.width(Tool::Text), 24.0);
         a.set_width(Tool::Rectangle, 500.0);
-        assert_eq!(a.width(Tool::Rectangle), MAX_WIDTH);
+        assert_eq!(a.width(Tool::Rectangle), 100.0);
         a.set_width(Tool::Rectangle, 0.0);
-        assert_eq!(a.width(Tool::Rectangle), MIN_WIDTH);
+        assert_eq!(a.width(Tool::Rectangle), 1.0);
+        a.set_width(Tool::Text, 2.0);
+        assert_eq!(a.width(Tool::Text), 8.0);
+        a.tool = Tool::Arrow;
+        a.arrow_heads = ArrowHeads::Both;
         let back: State = toml::from_str(&toml::to_string(&State { annotate: a, ..Default::default() }).unwrap()).unwrap();
-        assert_eq!(back.annotate.width(Tool::Rectangle), MIN_WIDTH);
+        assert_eq!(back.annotate.width(Tool::Rectangle), 1.0);
+        assert_eq!((back.annotate.tool, back.annotate.arrow_heads), (Tool::Arrow, ArrowHeads::Both));
     }
 }

@@ -27,7 +27,6 @@ use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
-use crate::annotate;
 use crate::capture::{Batch, NoEvents, OutputMeta};
 use crate::clipboard::Clipboard;
 use crate::config::Config;
@@ -41,7 +40,6 @@ use crate::overlay::{self, Outcome, Overlay};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const HIDE_TIMEOUT: Duration = Duration::from_millis(250);
-const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy)]
 enum Area {
@@ -301,19 +299,12 @@ impl App {
             Outcome::Cancel => return self.finish(Response::Cancelled),
             Outcome::Region(rect, action) => (Area::Rect(rect), action),
             Outcome::Picked(id) => (Area::Output(id), Action::Default),
-            Outcome::Annotated(shapes, action) => {
-                let image = overlay.take_image();
+            Outcome::Annotated(image, action) => {
                 self.overlay = None;
                 let _ = self.conn.flush();
-                return match image {
-                    Some(mut image) => {
-                        let whole = Rect { x: 0.0, y: 0.0, w: f64::from(image.width), h: f64::from(image.height) };
-                        annotate::burn(&mut image, whole, &shapes);
-                        self.deliver(image, action)
-                    }
-                    None => self.finish(Response::Error("annotation editor lost its image".into())),
-                };
+                return self.deliver(image, action);
             }
+            Outcome::Failed(e) => return self.finish(Response::Error(e)),
         };
         if !frozen.is_empty() {
             self.overlay = None;
@@ -504,16 +495,18 @@ impl App {
         metas
     }
 
-    /// Tooltips appear after the pointer rests on a toolbar button for a moment, as in Noctalia.
-    fn schedule_tooltip(&mut self) {
-        let Some(generation) = self.overlay.as_mut().and_then(Overlay::take_tooltip_request) else { return };
-        let _ = self.handle.insert_source(Timer::from_duration(TOOLTIP_DELAY), move |_, _, app: &mut App| {
-            let qh = app.qh.clone();
-            if let Some(overlay) = &mut app.overlay {
-                overlay.show_tooltip(generation, &qh);
-            }
-            TimeoutAction::Drop
-        });
+    /// Schedules what the overlay asked for (tooltip delays, long presses).
+    fn schedule_overlay_timers(&mut self) {
+        let Some(overlay) = &mut self.overlay else { return };
+        for (delay, timer) in overlay.take_timers() {
+            let _ = self.handle.insert_source(Timer::from_duration(delay), move |_, _, app: &mut App| {
+                let qh = app.qh.clone();
+                if let Some(overlay) = &mut app.overlay {
+                    overlay.timer(timer, &qh);
+                }
+                TimeoutAction::Drop
+            });
+        }
     }
 
     fn update_cursor(&mut self) {
@@ -601,7 +594,14 @@ impl SeatHandler for App {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         self.seat.get_or_insert_with(|| seat.clone());
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
+            // Repeats feed text entry (held Backspace, letters) and the size keys.
+            let repeat: smithay_client_toolkit::seat::keyboard::repeat::RepeatCallback<App> = Box::new(|app: &mut App, _, event: KeyEvent| {
+                let (qh, mods) = (app.qh.clone(), app.modifiers);
+                if let Some(overlay) = &mut app.overlay {
+                    overlay.key_repeat(&event, mods, &qh);
+                }
+            });
+            self.keyboard = self.seats.get_keyboard_with_repeat(qh, &seat, None, self.handle.clone(), repeat).ok();
         }
         if capability == Capability::Pointer && self.pointer.is_none()
             && let Ok(pointer) = self.seats.get_pointer(qh, &seat) {
@@ -634,7 +634,7 @@ impl KeyboardHandler for App {
 
     fn press_key(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
         let Some(overlay) = &mut self.overlay else { return };
-        if let Some(outcome) = overlay.key(event.keysym, self.modifiers, qh) {
+        if let Some(outcome) = overlay.key(&event, self.modifiers, qh) {
             self.overlay_outcome(outcome);
         }
     }
@@ -671,7 +671,7 @@ impl PointerHandler for App {
                 None => self.update_cursor(),
             }
         }
-        self.schedule_tooltip();
+        self.schedule_overlay_timers();
     }
 }
 

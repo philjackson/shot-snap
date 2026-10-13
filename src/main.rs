@@ -12,6 +12,7 @@ mod ipc;
 mod overlay;
 mod paint;
 mod picker;
+mod render;
 mod state;
 mod ui;
 

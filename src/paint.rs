@@ -100,7 +100,9 @@ pub fn lerp(a: Color, b: Color, k: f32) -> Color {
 }
 
 impl Fill {
-    /// Colour at point `p` of a shape whose painted box is `bounds` (same coordinate space).
+    /// Colour at point `p` of a shape whose painted box is `bounds` (same coordinate space). The
+    /// renderer uses femtovg's gradients; this spells out the same maths for the tests.
+    #[cfg(test)]
     pub fn color_at(&self, bounds: Rect, p: (f64, f64)) -> Color {
         match self {
             Fill::Solid(c) => *c,

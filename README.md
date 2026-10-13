@@ -42,9 +42,17 @@ start again.
 
 Add `--annotate` (or `-a`) to `region` or `fullscreen` to open the editor on the captured image
 before it's delivered. The editor appears on the monitor the capture came from, with
-the image centred under a toolbar at the top (1:1, scaled down if it doesn't fit). Drag on the image
-to draw a rectangle. Copy, Save and Done (✓) export the capture with the rectangles burned in, and
-the editor closes.
+the image centred under a toolbar at the top (1:1, scaled down if it doesn't fit). Pick a tool and
+draw on the image:
+
+- **Rectangle**: drag.
+- **Arrow**: drag from tail to tip. Hold the arrow button to choose where the heads go: at the
+  end, at the start, or both. The choice is remembered.
+- **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
+  the text you're typing. Size and colour changes apply to the text under the caret.
+
+Copy, Save and Done (✓) export the capture with the annotations drawn in, and the editor closes.
+The export uses the same renderer as the editor, so it matches what you see exactly.
 
 | Key | Action |
 |---|---|
@@ -52,16 +60,18 @@ the editor closes.
 | Enter / ✓ | Done: use the configured outputs |
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
-| Ctrl+Z / ↶ | Undo the last rectangle |
+| Ctrl+Z / ↶ | Undo the last annotation |
+| `s` / `a` / `t` | Rectangle / arrow / text tool |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
 
 #### Toolbar
 
-Undo · Rectangle, colour · S / M / L sizes (½×, 1×, 2× the tool's default 6px) · fine size
+Undo · Rectangle, arrow, text, colour · S / M / L sizes (½×, 1×, 2× the tool's default: 6px
+strokes, 24px text) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
-tooltip. Each tool remembers its own width, and the fine stepper stays shown or hidden between
-runs (both in the state file).
+tooltip. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
+stepper is showing are remembered between runs (all in the state file).
 
 #### Colours and gradients
 

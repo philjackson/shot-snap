@@ -4,12 +4,13 @@
 //! resolution so frozen frames show 1:1 and lines stay crisp under fractional scaling.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use femtovg::{Canvas, ImageFlags, ImageId, Paint, Path};
 use femtovg::renderer::OpenGl;
 use smithay_client_toolkit::compositor::{CompositorState, FrameCallbackData};
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
-use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
+use smithay_client_toolkit::seat::keyboard::{KeyEvent, Keysym, Modifiers};
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface};
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -17,7 +18,7 @@ use wayland_client::QueueHandle;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-use crate::annotate::{Shape as Annotation, Tool, SIZE_PRESETS};
+use crate::annotate::{ArrowHeads, Kind, Shape as Annotation, Tool, SIZE_PRESETS};
 use crate::app::App;
 use crate::capture::{NoEvents, OutputMeta};
 use crate::config::{Color, Theme};
@@ -27,6 +28,7 @@ use crate::gl::{Gl, GlSurface};
 use crate::image::{Image, OutputFrame};
 use crate::paint::Fill;
 use crate::picker::Picker;
+use crate::render::{self, Map};
 use crate::state::AnnotateState;
 use crate::ui::{card, fill_rect, text_paint, text_width};
 
@@ -58,20 +60,33 @@ pub enum Mode {
     Annotate,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Outcome {
     Region(Rect, Action),
     Picked(u32),
-    Annotated(Vec<Annotation>, Action),
+    /// The editor's image with the annotations rendered in.
+    Annotated(Image, Action),
+    Failed(String),
     Cancel,
 }
+
+/// Delayed work the overlay asks the app to schedule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Timer {
+    Tooltip(u64),
+    LongPress(u64),
+}
+
+const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+const LONG_PRESS: Duration = Duration::from_millis(400);
 
 /// Something clickable drawn on a surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Hit {
     Output(u32),
     Undo,
-    RectangleTool,
+    Tool(Tool),
+    ArrowHeads(ArrowHeads),
     Color,
     SizePreset(usize),
     SizeAdvanced,
@@ -132,6 +147,8 @@ struct Surf {
     /// Hit boxes in surface-local coordinates, from the last draw.
     buttons: Vec<(Rect, Hit)>,
     toolbar: Option<Rect>,
+    /// The arrow-ends menu, when open.
+    menu: Option<Rect>,
 }
 
 /// The image being annotated. Annotations are kept in image pixels.
@@ -165,7 +182,12 @@ pub struct Overlay {
     /// timers whenever the hovered button changes.
     tooltip: Option<Hit>,
     hover_gen: u64,
-    tooltip_request: Option<u64>,
+    timers: Vec<(Duration, Timer)>,
+    /// The arrow button is held: the generation its long-press timer belongs to.
+    long_press: Option<u64>,
+    arrow_menu: bool,
+    /// Index of the text annotation being typed.
+    editing: Option<usize>,
     theme: Theme,
     hidden: bool,
 }
@@ -199,7 +221,7 @@ impl Overlay {
                 layer.set_exclusive_zone(-1);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
                 layer.commit();
-                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new(), toolbar: None }
+                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new(), toolbar: None, menu: None }
             })
             .collect();
         let preselect = preselect.and_then(|r| r.intersect(&desktop)).filter(|r| r.w >= MIN_SELECTION && r.h >= MIN_SELECTION);
@@ -221,7 +243,10 @@ impl Overlay {
             tool: Tool::Rectangle,
             tooltip: None,
             hover_gen: 0,
-            tooltip_request: None,
+            timers: Vec::new(),
+            long_press: None,
+            arrow_menu: false,
+            editing: None,
             theme,
             hidden: false,
         }
@@ -231,6 +256,7 @@ impl Overlay {
     pub fn new_editor(init: Init, output: OutputMeta, image: Image, scale: f64, theme: Theme, annotate: AnnotateState) -> Self {
         let mut overlay = Self::new(init, Mode::Annotate, vec![output], Vec::new(), theme, false, None);
         overlay.editor = Some(Editor { image, scale, canvas: Rect::default(), fit: 1.0 });
+        overlay.tool = annotate.tool;
         overlay.picker = Some(Picker::new(annotate));
         overlay
     }
@@ -240,16 +266,84 @@ impl Overlay {
         self.picker.take().map(Picker::finish)
     }
 
-    /// After a hover change: the generation a tooltip timer should be started for.
-    pub fn take_tooltip_request(&mut self) -> Option<u64> {
-        self.tooltip_request.take()
+    /// Timers to schedule, as (delay, what to report back through `timer`).
+    pub fn take_timers(&mut self) -> Vec<(Duration, Timer)> {
+        std::mem::take(&mut self.timers)
     }
 
-    /// Tooltip timer fired: show it if the pointer is still on the same button.
-    pub fn show_tooltip(&mut self, generation: u64, qh: &QueueHandle<App>) {
-        if generation == self.hover_gen && self.drag == Drag::None && self.hover_button.is_some_and(|h| tooltip_text(h).is_some()) {
-            self.tooltip = self.hover_button;
-            self.redraw_all(qh);
+    pub fn timer(&mut self, timer: Timer, qh: &QueueHandle<App>) {
+        match timer {
+            // Show the tooltip if the pointer is still on the same button.
+            Timer::Tooltip(generation) => {
+                if generation == self.hover_gen && self.drag == Drag::None && self.hover_button.is_some_and(|h| tooltip_text(h).is_some()) {
+                    self.tooltip = self.hover_button;
+                }
+            }
+            // Still holding the arrow button: open the ends menu.
+            Timer::LongPress(generation) => {
+                if self.long_press == Some(generation) {
+                    self.arrow_menu = true;
+                }
+            }
+        }
+        self.redraw_all(qh);
+    }
+
+    fn arrow_heads(&self) -> ArrowHeads {
+        self.picker.as_ref().map(|p| p.state().arrow_heads).unwrap_or_default()
+    }
+
+    fn set_tool(&mut self, tool: Tool) {
+        self.commit_text();
+        self.tool = tool;
+        if let Some(p) = &mut self.picker {
+            p.state_mut().tool = tool;
+        }
+    }
+
+    fn set_arrow_heads(&mut self, heads: ArrowHeads) {
+        if let Some(p) = &mut self.picker {
+            p.state_mut().arrow_heads = heads;
+        }
+        self.set_tool(Tool::Arrow);
+        self.arrow_menu = false;
+    }
+
+    fn current_fill(&self) -> crate::paint::Fill {
+        self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default()
+    }
+
+    fn image_scale(&self) -> f64 {
+        self.editor.as_ref().map_or(1.0, |e| e.scale)
+    }
+
+    /// Places a text caret at `at` (image pixels).
+    fn start_text(&mut self, at: (f64, f64)) {
+        self.commit_text();
+        let shape = Annotation { kind: Kind::Text { at, text: String::new() }, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
+        self.annotations.push(shape);
+        self.editing = Some(self.annotations.len() - 1);
+    }
+
+    /// Ends text entry, dropping it if nothing was typed.
+    fn commit_text(&mut self) {
+        if let Some(i) = self.editing.take()
+            && matches!(&self.annotations.get(i), Some(Annotation { kind: Kind::Text { text, .. }, .. }) if text.is_empty())
+        {
+            self.annotations.remove(i);
+        }
+    }
+
+    fn cancel_text(&mut self) {
+        if let Some(i) = self.editing.take() {
+            self.annotations.remove(i);
+        }
+    }
+
+    fn editing_text(&mut self) -> Option<&mut String> {
+        match &mut self.annotations.get_mut(self.editing?)?.kind {
+            Kind::Text { text, .. } => Some(text),
+            _ => None,
         }
     }
 
@@ -269,15 +363,12 @@ impl Overlay {
     }
 
     fn undo(&mut self) {
+        self.commit_text();
         self.annotations.pop();
     }
 
     fn picker_open(&self) -> bool {
         self.picker.as_ref().is_some_and(|p| p.open)
-    }
-
-    pub fn take_image(&mut self) -> Option<Image> {
-        self.editor.take().map(|e| e.image)
     }
 
     /// Global pointer position to image pixels (unclamped).
@@ -387,6 +478,7 @@ impl Overlay {
             (Mode::Annotate, _) if self.picker.as_ref().is_some_and(|p| p.dragging()) => Shape::Default,
             (Mode::Annotate, Drag::None) if self.hover_button.is_some() => Shape::Pointer,
             (Mode::Annotate, Drag::None) if self.over_toolbar => Shape::Default,
+            (Mode::Annotate, Drag::None) if self.tool == Tool::Text => Shape::Text,
             (_, Drag::Draw { .. }) => Shape::Crosshair,
             (_, Drag::Move { .. }) => Shape::Grabbing,
             (_, Drag::Resize { edges, .. }) => edges.cursor(),
@@ -473,15 +565,23 @@ impl Overlay {
         }
         if self.drag == Drag::None {
             let s = &self.surfs[i];
+            // Leaving the arrow button before the long press fires cancels it.
+            if self.long_press.is_some() && !self.arrow_menu && !s.buttons.iter().any(|(r, h)| *h == Hit::Tool(Tool::Arrow) && r.contains(pos)) {
+                self.long_press = None;
+            }
             let hover = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
             if hover != self.hover_button {
                 self.hover_gen += 1;
                 self.tooltip = None;
-                self.tooltip_request = hover.and_then(tooltip_text).map(|_| self.hover_gen);
+                if hover.and_then(tooltip_text).is_some() {
+                    self.timers.push((TOOLTIP_DELAY, Timer::Tooltip(self.hover_gen)));
+                }
             }
             self.hover_button = hover;
-            // The colour panel counts as toolbar: it's chrome, not canvas.
-            self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos)) || self.picker.as_ref().is_some_and(|pk| pk.contains(pos));
+            // Panels and menus count as toolbar: they're chrome, not canvas.
+            self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos))
+                || s.menu.is_some_and(|r| r.contains(pos))
+                || self.picker.as_ref().is_some_and(|pk| pk.contains(pos));
             if self.over_toolbar && self.picker.as_ref().is_some_and(|pk| pk.contains(pos)) {
                 self.hover_button = None;
             }
@@ -508,7 +608,29 @@ impl Overlay {
             }
             (Mode::Picker, false) => None,
             (Mode::Annotate, true) if self.press_picker(p) => None,
+            (Mode::Annotate, true) if self.arrow_menu => {
+                // The ends menu is open: pick from it, or any other click just closes it.
+                match self.hover_button {
+                    Some(Hit::ArrowHeads(heads)) => self.set_arrow_heads(heads),
+                    _ => self.arrow_menu = false,
+                }
+                None
+            }
             (Mode::Annotate, true) => match self.hover_button {
+                Some(Hit::Tool(Tool::Arrow)) => {
+                    // Decided on release: a short click picks the tool, a long press opens the menu.
+                    self.long_press = Some(self.hover_gen);
+                    self.timers.push((LONG_PRESS, Timer::LongPress(self.hover_gen)));
+                    None
+                }
+                Some(Hit::Tool(tool)) => {
+                    self.set_tool(tool);
+                    None
+                }
+                Some(Hit::ArrowHeads(heads)) => {
+                    self.set_arrow_heads(heads);
+                    None
+                }
                 Some(Hit::Color) => {
                     if let Some(picker) = &mut self.picker {
                         picker.toggle();
@@ -551,8 +673,13 @@ impl Overlay {
                 }
                 _ => {
                     // Drawing starts on the image; the drag may then leave it and is clamped.
-                    if let Some(ip) = self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
-                        self.drag = Drag::Draw { anchor: ip };
+                    match self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
+                        Some(ip) if self.tool == Tool::Text => self.start_text(ip),
+                        Some(ip) => {
+                            self.commit_text();
+                            self.drag = Drag::Draw { anchor: ip };
+                        }
+                        None => self.commit_text(),
                     }
                     None
                 }
@@ -561,13 +688,20 @@ impl Overlay {
                 if let Some(picker) = self.picker.as_mut().filter(|p| p.dragging()) {
                     picker.release();
                 }
+                if self.long_press.take().is_some() {
+                    match self.hover_button {
+                        // Released on the button before the menu opened: a plain click.
+                        Some(Hit::Tool(Tool::Arrow)) if !self.arrow_menu => self.set_tool(Tool::Arrow),
+                        // Press, slide onto an item, release.
+                        Some(Hit::ArrowHeads(heads)) => self.set_arrow_heads(heads),
+                        _ => {}
+                    }
+                }
                 if let (Drag::Draw { anchor }, Some(ip)) = (std::mem::replace(&mut self.drag, Drag::None), self.to_image(p)) {
-                    let rect = Rect::from_points(anchor, self.clamp_image(ip));
-                    let scale = self.editor.as_ref().map_or(1.0, |e| e.scale);
-                    // Ignore clicks: the rectangle must be at least a couple of logical pixels.
-                    if rect.w >= MIN_SELECTION * scale && rect.h >= MIN_SELECTION * scale {
-                        let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                        self.annotations.push(Annotation { rect, width: self.tool_width() * scale, fill });
+                    let end = self.clamp_image(ip);
+                    if let Some(kind) = self.shape_for(anchor, end) {
+                        let shape = Annotation { kind, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
+                        self.annotations.push(shape);
                     }
                 }
                 None
@@ -598,8 +732,69 @@ impl Overlay {
         outcome
     }
 
-    pub fn key(&mut self, keysym: Keysym, mods: Modifiers, qh: &QueueHandle<App>) -> Option<Outcome> {
+    /// The shape the current tool makes for a drag from `a` to `b` (image pixels), or None
+    /// for a click-sized drag.
+    fn shape_for(&self, a: (f64, f64), b: (f64, f64)) -> Option<Kind> {
+        let min = MIN_SELECTION * self.image_scale();
+        match self.tool {
+            Tool::Rectangle => {
+                let rect = Rect::from_points(a, b);
+                (rect.w >= min && rect.h >= min).then_some(Kind::Rectangle(rect))
+            }
+            Tool::Arrow => ((b.0 - a.0).hypot(b.1 - a.1) >= min).then_some(Kind::Arrow { from: a, to: b, heads: self.arrow_heads() }),
+            Tool::Text => None,
+        }
+    }
+
+    /// Typing into the text being edited. Returns false when no text is being edited.
+    fn text_key(&mut self, event: &KeyEvent, mods: Modifiers) -> bool {
+        if self.editing.is_none() {
+            return false;
+        }
+        match event.keysym {
+            Keysym::Return | Keysym::KP_Enter => self.commit_text(),
+            Keysym::Escape => self.cancel_text(),
+            Keysym::BackSpace => {
+                if let Some(text) = self.editing_text() {
+                    text.pop();
+                }
+            }
+            // Every other key is swallowed so shortcuts can't fire mid-word.
+            _ if mods.ctrl || mods.alt || mods.logo => {}
+            _ => {
+                let typed: String = event.utf8.as_deref().unwrap_or("").chars().filter(|c| !c.is_control()).collect();
+                if let Some(text) = self.editing_text() {
+                    text.push_str(&typed);
+                }
+            }
+        }
+        true
+    }
+
+    /// Held keys: only typing and size steps repeat.
+    pub fn key_repeat(&mut self, event: &KeyEvent, mods: Modifiers, qh: &QueueHandle<App>) {
+        let repeatable = match event.keysym {
+            Keysym::Return | Keysym::KP_Enter | Keysym::Escape => false,
+            Keysym::bracketleft | Keysym::bracketright => self.editing.is_none(),
+            _ => self.editing.is_some(),
+        };
+        if repeatable {
+            let _ = self.key(event, mods, qh);
+        }
+    }
+
+    pub fn key(&mut self, event: &KeyEvent, mods: Modifiers, qh: &QueueHandle<App>) -> Option<Outcome> {
+        let keysym = event.keysym;
         if self.hidden {
+            return None;
+        }
+        if self.text_key(event, mods) {
+            self.redraw_all(qh);
+            return None;
+        }
+        if keysym == Keysym::Escape && self.arrow_menu {
+            self.arrow_menu = false;
+            self.redraw_all(qh);
             return None;
         }
         // Esc closes the colour panel before it closes the editor.
@@ -634,6 +829,15 @@ impl Overlay {
                 Keysym::bracketleft | Keysym::bracketright if !mods.ctrl => {
                     let step = if keysym == Keysym::bracketleft { -1.0 } else { 1.0 };
                     self.set_tool_width(self.tool_width() + step);
+                    self.redraw_all(qh);
+                    None
+                }
+                Keysym::s | Keysym::a | Keysym::t if !mods.ctrl && !mods.alt && !mods.logo => {
+                    self.set_tool(match keysym {
+                        Keysym::s => Tool::Rectangle,
+                        Keysym::a => Tool::Arrow,
+                        _ => Tool::Text,
+                    });
                     self.redraw_all(qh);
                     None
                 }
@@ -677,8 +881,24 @@ impl Overlay {
         self.picker.as_mut().is_some_and(|picker| picker.open && picker.press(local))
     }
 
-    fn annotated(&self, action: Action) -> Outcome {
-        Outcome::Annotated(self.annotations.clone(), action)
+    /// Renders the export with the same renderer as the preview, then hands it over.
+    fn annotated(&mut self, action: Action) -> Outcome {
+        self.commit_text();
+        let scale = self.image_scale();
+        let (Some(editor), Some(s)) = (&self.editor, self.surfs.first_mut()) else {
+            return Outcome::Failed("annotation editor has no image".into());
+        };
+        let (Some(gl), Some(texture)) = (s.gl.as_mut(), s.texture) else {
+            return Outcome::Failed("annotation editor isn't ready yet".into());
+        };
+        if let Err(e) = gl.make_current() {
+            return Outcome::Failed(format!("{e:#}"));
+        }
+        let font = gl.font;
+        match render::export(&mut gl.canvas, font, texture, &editor.image, &self.annotations, scale) {
+            Ok(image) => Outcome::Annotated(image, action),
+            Err(e) => Outcome::Failed(format!("rendering the annotated image: {e:#}")),
+        }
     }
 
     /// Image size the current selection would produce, for the size badge.
@@ -707,11 +927,17 @@ impl Overlay {
         };
         let picker_outputs: Vec<(u32, String)> = self.surfs.iter().map(|s| (s.meta.id, picker_label(&s.meta))).collect();
         let drawing = match (self.drag, self.pointer.and_then(|p| self.to_image(p))) {
-            (Drag::Draw { anchor }, Some(ip)) => Some(Rect::from_points(anchor, self.clamp_image(ip))),
+            (Drag::Draw { anchor }, Some(ip)) => self.shape_for(anchor, self.clamp_image(ip)),
             _ => None,
         };
         if self.mode == Mode::Annotate {
             self.layout_editor(i);
+            // Size and colour changes restyle the text under the caret, as in Noctalia.
+            let (width, fill) = (self.tool_width() * self.image_scale(), self.current_fill());
+            if let Some(shape) = self.editing.and_then(|i| self.annotations.get_mut(i)) {
+                shape.width = width;
+                shape.fill = fill;
+            }
         }
         let picker_open = self.picker_open();
         let tool_width = self.tool_width();
@@ -722,6 +948,8 @@ impl Overlay {
             tool: self.tool,
             width: tool_width,
             advanced: self.advanced_size(),
+            arrow_heads: self.arrow_heads(),
+            arrow_menu: self.arrow_menu,
         };
         let tooltip = self.tooltip.and_then(tooltip_text);
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
@@ -809,19 +1037,13 @@ impl Overlay {
                     if let Some(tex) = s.texture {
                         fill_rect(canvas, cx, cy, cw, ch, Paint::image(tex, cx, cy, cw, ch, 0.0, 1.0));
                     }
-                    // Strokes are clipped to the image, as they are when burned in.
+                    // Annotations are clipped to the image, as they are in the export.
                     canvas.save();
                     canvas.scissor(cx, cy, cw, ch);
                     let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                    let preview = drawing.map(|rect| Annotation { rect, width: tool_width * e.scale, fill });
-                    let to_local = |r: Rect| Rect { x: c.x + r.x / e.fit, y: c.y + r.y / e.fit, w: r.w / e.fit, h: r.h / e.fit };
-                    for shape in self.annotations.iter().chain(preview.as_ref()) {
-                        let r = to_local(shape.rect);
-                        let mut path = Path::new();
-                        path.rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32);
-                        let paint = shape.fill.paint(to_local(shape.bounds())).with_line_width((shape.width / e.fit) as f32);
-                        canvas.stroke_path(&path, &paint);
-                    }
+                    let mut shapes = self.annotations.clone();
+                    shapes.extend(drawing.map(|kind| Annotation { kind, width: tool_width * e.scale, fill }));
+                    render::draw_shapes(canvas, font, &shapes, Map { ox: c.x, oy: c.y, fit: e.fit }, e.scale, self.editing);
                     canvas.restore();
                     // Inset outline separating the image from the surround; never exported.
                     let mut path = Path::new();
@@ -833,6 +1055,13 @@ impl Overlay {
                 let anchor = s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).map(|(r, _)| *r);
                 if let (Some(picker), Some(anchor), Some(bar)) = (self.picker.as_mut().filter(|p| p.open), anchor, s.toolbar) {
                     picker.draw(canvas, font, t, anchor, (bar.bottom() as f32) + SPACE_SM, w);
+                }
+                s.menu = None;
+                let arrow = s.buttons.iter().find(|(_, hit)| *hit == Hit::Tool(Tool::Arrow)).map(|(r, _)| *r);
+                if let (true, Some(arrow), Some(bar)) = (self.arrow_menu, arrow, s.toolbar) {
+                    let (items, menu) = draw_arrow_menu(canvas, font, t, arrow, bar.bottom() as f32 + SPACE_SM, w, &toolbar_state);
+                    s.buttons.extend(items);
+                    s.menu = Some(menu);
                 }
                 let target = self.tooltip.and_then(|hit| s.buttons.iter().find(|(_, h)| *h == hit)).map(|(r, _)| *r);
                 if let (Some(text), Some(target), Some(bar), Some(font)) = (tooltip, target, s.toolbar, font) {
@@ -958,6 +1187,8 @@ struct ToolbarState {
     tool: Tool,
     width: f64,
     advanced: bool,
+    arrow_heads: ArrowHeads,
+    arrow_menu: bool,
 }
 
 const PRESET_W: f32 = 26.0;
@@ -968,7 +1199,9 @@ const DISABLED_ALPHA: f32 = 0.55;
 fn tooltip_text(hit: Hit) -> Option<&'static str> {
     Some(match hit {
         Hit::Undo => "Undo (Ctrl+Z)",
-        Hit::RectangleTool => "Rectangle",
+        Hit::Tool(Tool::Rectangle) => "Rectangle (s)",
+        Hit::Tool(Tool::Arrow) => "Arrow (a) · hold to choose the ends",
+        Hit::Tool(Tool::Text) => "Text (t) · click to type, Enter to finish",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
         Hit::SizePreset(1) => "Medium",
@@ -980,14 +1213,24 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Save => "Save the annotated image (Ctrl+S)",
         Hit::Done => "Apply the screenshot settings (Enter)",
         Hit::Close => "Close without delivering (Esc)",
-        Hit::Output(_) => return None,
+        Hit::Output(_) | Hit::ArrowHeads(_) => return None,
     })
 }
 
 /// Noctalia's annotation toolbar: a rounded card centred at the top of each output.
 fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<femtovg::FontId>, w: f32, current: &Fill, st: &ToolbarState) -> (Vec<(Rect, Hit)>, Option<Rect>) {
     use Item::*;
-    let mut items = vec![Button(Hit::Undo), Separator, Button(Hit::RectangleTool), Button(Hit::Color), Separator, Presets, Button(Hit::SizeAdvanced)];
+    let mut items = vec![
+        Button(Hit::Undo),
+        Separator,
+        Button(Hit::Tool(Tool::Rectangle)),
+        Button(Hit::Tool(Tool::Arrow)),
+        Button(Hit::Tool(Tool::Text)),
+        Button(Hit::Color),
+        Separator,
+        Presets,
+        Button(Hit::SizeAdvanced),
+    ];
     if st.advanced {
         items.extend([Button(Hit::SizeDown), SizeLabel, Button(Hit::SizeUp)]);
     }
@@ -1048,9 +1291,10 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
             }
             Button(hit) => {
                 let enabled = hit != Hit::Undo || st.can_undo;
-                // The only tool is always selected; Done is the primary action.
+                // The selected tool and Done (the primary action) are filled.
                 let (fill, fg) = match (hit, st.hover == Some(hit) && enabled) {
-                    (Hit::RectangleTool, _) => (Some(t.primary), t.on_primary),
+                    (Hit::Tool(tool), _) if tool == st.tool => (Some(t.primary), t.on_primary),
+                    (Hit::Tool(Tool::Arrow), false) if st.arrow_menu => (Some(t.surface_variant), t.on_surface),
                     (_, true) => (Some(t.hover), t.on_hover),
                     (Hit::Color, false) if st.picker_open => (Some(t.surface_variant), t.on_surface),
                     (Hit::SizeAdvanced, false) if st.advanced => (Some(t.surface_variant), t.on_surface),
@@ -1068,6 +1312,15 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
                     // The button shows the current paint.
                     let r = to_rect((x + pad, y + pad, ICON, ICON));
                     crate::picker::swatch(canvas, r, current, false, t, matches!(current, Fill::Solid(_)));
+                } else if hit == Hit::Tool(Tool::Arrow) {
+                    draw_arrow_icon(canvas, st.arrow_heads, x + pad, y + pad, fg);
+                    // Corner mark: this button has a menu (long press).
+                    let mut mark = Path::new();
+                    mark.move_to(x + CONTROL_SM - 4.0, y + CONTROL_SM - 9.0);
+                    mark.line_to(x + CONTROL_SM - 4.0, y + CONTROL_SM - 4.0);
+                    mark.line_to(x + CONTROL_SM - 9.0, y + CONTROL_SM - 4.0);
+                    mark.close();
+                    canvas.fill_path(&mark, &Paint::color(fg.with_alpha(0.8).fv()));
                 } else {
                     draw_icon(canvas, hit, x + pad, y + pad, fg);
                 }
@@ -1077,6 +1330,58 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
         x += item_w(item) + SPACE_SM;
     }
     (buttons, Some(to_rect((x0, y0, card_w, card_h))))
+}
+
+const MENU_W: f32 = 200.0;
+
+/// The arrow-ends menu under the arrow button. Returns its items and its card.
+fn draw_arrow_menu(canvas: &mut Canvas<OpenGl>, font: Option<femtovg::FontId>, t: &Theme, anchor: Rect, top: f32, w: f32, st: &ToolbarState) -> (Vec<(Rect, Hit)>, Rect) {
+    let pad = SPACE_SM / 2.0;
+    let (cw, ch) = (MENU_W, CONTROL_SM * 3.0 + pad * 2.0);
+    let x0 = (anchor.x as f32).clamp(4.0, (w - cw - 4.0).max(4.0)).round();
+    card(canvas, (x0, top, cw, ch), RADIUS_MD + 2.0, t.surface.with_alpha(0.96), t.outline);
+    let mut items = Vec::new();
+    for (i, heads) in ArrowHeads::ALL.into_iter().enumerate() {
+        let r = (x0 + pad, top + pad + CONTROL_SM * i as f32, cw - pad * 2.0, CONTROL_SM);
+        let hit = Hit::ArrowHeads(heads);
+        let (fill, fg) = match (heads == st.arrow_heads, st.hover == Some(hit)) {
+            (_, true) => (Some(t.hover), t.on_hover),
+            (true, false) => (Some(t.primary), t.on_primary),
+            _ => (None, t.on_surface),
+        };
+        if let Some(fill) = fill {
+            let mut path = Path::new();
+            path.rounded_rect(r.0, r.1, r.2, r.3, RADIUS_MD);
+            canvas.fill_path(&path, &Paint::color(fill.fv()));
+        }
+        let ipad = (CONTROL_SM - ICON) / 2.0;
+        draw_arrow_icon(canvas, heads, r.0 + ipad, r.1 + ipad, fg);
+        if let Some(font) = font {
+            let _ = canvas.fill_text(r.0 + CONTROL_SM + 2.0, r.1 + CONTROL_SM / 2.0, heads.label(), &text_paint(font, CAPTION_FONT, fg));
+        }
+        items.push((to_rect(r), hit));
+    }
+    (items, to_rect((x0, top, cw, ch)))
+}
+
+/// A diagonal arrow with heads where `heads` says.
+fn draw_arrow_icon(canvas: &mut Canvas<OpenGl>, heads: ArrowHeads, x: f32, y: f32, color: Color) {
+    let (a, b) = ((x + 3.0, y + 13.0), (x + 13.0, y + 3.0));
+    let mut path = Path::new();
+    path.move_to(a.0, a.1);
+    path.line_to(b.0, b.1);
+    if matches!(heads, ArrowHeads::End | ArrowHeads::Both) {
+        path.move_to(b.0 - 6.0, b.1);
+        path.line_to(b.0, b.1);
+        path.line_to(b.0, b.1 + 6.0);
+    }
+    if matches!(heads, ArrowHeads::Start | ArrowHeads::Both) {
+        path.move_to(a.0 + 6.0, a.1);
+        path.line_to(a.0, a.1);
+        path.line_to(a.0, a.1 - 6.0);
+    }
+    let paint = Paint::color(color.fv()).with_line_width(1.75).with_line_cap(femtovg::LineCap::Round).with_line_join(femtovg::LineJoin::Round);
+    canvas.stroke_path(&path, &paint);
 }
 
 /// A caption card under the hovered toolbar button, kept on screen.
@@ -1093,7 +1398,18 @@ fn draw_tooltip(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, t
 fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color) {
     let mut path = Path::new();
     match hit {
-        Hit::RectangleTool => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
+        Hit::Tool(Tool::Rectangle) => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
+        Hit::Tool(Tool::Text) => {
+            // Tabler typography-ish: a T.
+            path.move_to(x + 3.0, y + 4.0);
+            path.line_to(x + 3.0, y + 2.5);
+            path.line_to(x + 13.0, y + 2.5);
+            path.line_to(x + 13.0, y + 4.0);
+            path.move_to(x + 8.0, y + 2.5);
+            path.line_to(x + 8.0, y + 13.5);
+            path.move_to(x + 6.0, y + 13.5);
+            path.line_to(x + 10.0, y + 13.5);
+        }
         Hit::Copy => {
             path.rounded_rect(x + 5.5, y + 5.5, 9.0, 9.0, 1.5);
             path.move_to(x + 10.5, y + 5.5);
@@ -1153,7 +1469,7 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             path.move_to(x + 8.0, y + 4.0);
             path.line_to(x + 8.0, y + 12.0);
         }
-        Hit::Output(_) | Hit::Color | Hit::SizePreset(_) => return,
+        Hit::Output(_) | Hit::Color | Hit::SizePreset(_) | Hit::Tool(Tool::Arrow) | Hit::ArrowHeads(_) => return,
     }
     let paint = Paint::color(color.fv())
         .with_line_width(1.75)
