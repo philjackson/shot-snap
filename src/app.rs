@@ -548,7 +548,13 @@ impl App {
         let response = match result {
             Ok(delivered) => {
                 let clip = match (delivered.clipboard, self.seat.clone()) {
-                    (Some(png), Some(seat)) => self.clipboard.set(png, &seat, &self.qh),
+                    (Some(png), Some(seat)) => {
+                        let result = self.clipboard.set(png.clone(), &seat, &self.qh);
+                        if result.is_ok() && self.config.notify {
+                            crate::notify::copied(png, delivered.saved.clone());
+                        }
+                        result
+                    }
                     (Some(_), None) => Err(anyhow::anyhow!("no seat for the clipboard")),
                     (None, _) => Ok(()),
                 };

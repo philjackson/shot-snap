@@ -19,8 +19,8 @@ shot-snap window pick        # click a window
 
 Add `-a` (`--annotate`) to any of these to edit the screenshot before it's saved.
 
-Screenshots are saved to your Pictures folder and copied to the clipboard. The saved path is
-printed. The exit status is `0` on success, `1` on error and `2` if you cancel.
+Screenshots are saved to your Pictures folder and copied to the clipboard, with a notification
+showing a preview. The saved path is printed. The exit status is `0` on success, `1` on error and `2` if you cancel.
 
 shot-snap keeps a small background process running so captures are instant. It starts
 automatically; after updating shot-snap, run `shot-snap --restart-daemon` once.
@@ -111,6 +111,7 @@ freeze_screen        = true    # freeze the screen while selecting
 confirm_region       = false   # adjust the selection before capturing
 remember_last_region = false   # start with the previous selection
 show_cursor          = false   # include the mouse pointer
+notify               = true    # notification with a preview when copied to the clipboard
 pipe_command         = ""      # e.g. 'satty -f -'; the PNG is sent on stdin
 
 [theme]

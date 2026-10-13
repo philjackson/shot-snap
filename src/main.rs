@@ -10,6 +10,7 @@ mod gl;
 mod hyprland_proto;
 mod image;
 mod ipc;
+mod notify;
 mod overlay;
 mod paint;
 mod picker;

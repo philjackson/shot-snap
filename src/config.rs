@@ -18,6 +18,8 @@ pub struct Config {
     pub show_cursor: bool,
     /// Run through `/bin/sh -lc` with the PNG on stdin. Empty = off.
     pub pipe_command: String,
+    /// Show a notification, with a preview, when a screenshot is copied to the clipboard.
+    pub notify: bool,
     pub theme: Theme,
 }
 
@@ -33,6 +35,7 @@ impl Default for Config {
             remember_last_region: false,
             show_cursor: false,
             pipe_command: String::new(),
+            notify: true,
             theme: Theme::default(),
         }
     }
