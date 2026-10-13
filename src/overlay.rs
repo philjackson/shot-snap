@@ -48,6 +48,8 @@ const SPACE_SM: f32 = 8.0;
 const SPACE_MD: f32 = 12.0;
 const BTN_LEFT: u32 = 0x110;
 const MIN_SELECTION: f64 = 2.0;
+/// Smallest crop, in logical pixels.
+const MIN_CROP: f64 = 8.0;
 const RADIUS_XL: f32 = 12.0;
 const CONTROL_SM: f32 = 32.0;
 const ICON: f32 = 16.0;
@@ -143,6 +145,8 @@ enum Drag {
     Move { grab: (f64, f64) },
     Resize { edges: Edges, orig: Rect },
     Draw { anchor: (f64, f64) },
+    /// Adjusting the crop (image pixels): edges being dragged, or none to move it whole.
+    Crop { edges: Edges, grab: (f64, f64), orig: Rect },
 }
 
 struct Surf {
@@ -214,6 +218,8 @@ pub struct Overlay {
     menu: Option<Tool>,
     /// Index of the text annotation being typed.
     editing: Option<usize>,
+    /// Export crop in image pixels; None means the whole image. Not part of undo, as in Noctalia.
+    crop: Option<Rect>,
     /// Window picker: windows on screen (topmost first) and the one under the pointer.
     windows: Vec<Window>,
     hover_window: Option<usize>,
@@ -278,6 +284,7 @@ impl Overlay {
             long_press: None,
             menu: None,
             editing: None,
+            crop: None,
             windows: Vec::new(),
             hover_window: None,
             theme,
@@ -380,6 +387,27 @@ impl Overlay {
         match self.tool {
             Tool::Highlight => crate::paint::Fill::Solid(self.highlight_color()),
             _ => self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default(),
+        }
+    }
+
+    fn image_rect(&self) -> Option<Rect> {
+        self.editor.as_ref().map(|e| Rect { x: 0.0, y: 0.0, w: f64::from(e.image.width), h: f64::from(e.image.height) })
+    }
+
+    /// The crop frame: the crop if set, else the whole image.
+    fn crop_frame(&self) -> Option<Rect> {
+        self.crop.or_else(|| self.image_rect())
+    }
+
+    /// What pressing at image point `ip` grabs of the crop frame, with the crop tool selected.
+    fn crop_handle(&self, ip: (f64, f64)) -> Option<Drag> {
+        let (frame, fit) = (self.crop_frame()?, self.editor.as_ref()?.fit);
+        // The margin is in screen pixels, so handles are as easy to grab at any zoom.
+        let edges = edges_at(frame, ip, HANDLE_MARGIN * fit);
+        if edges.any() || frame.contains(ip) {
+            Some(Drag::Crop { edges, grab: ip, orig: frame })
+        } else {
+            None
         }
     }
 
@@ -597,6 +625,13 @@ impl Overlay {
             (Mode::Annotate, Drag::None) if self.hover_button.is_some() => Shape::Pointer,
             (Mode::Annotate, Drag::None) if self.over_toolbar => Shape::Default,
             (Mode::Annotate, Drag::None) if self.tool == Tool::Text => Shape::Text,
+            (Mode::Annotate, Drag::Crop { edges, .. }) if edges.any() => edges.cursor(),
+            (_, Drag::Crop { .. }) => Shape::Grabbing,
+            (Mode::Annotate, Drag::None) if self.tool == Tool::Crop => match self.pointer.and_then(|p| self.to_image(p)).and_then(|ip| self.crop_handle(ip)) {
+                Some(Drag::Crop { edges, .. }) if edges.any() => edges.cursor(),
+                Some(_) => Shape::Move,
+                None => Shape::Default,
+            },
             (_, Drag::Draw { .. }) => Shape::Crosshair,
             (_, Drag::Move { .. }) => Shape::Grabbing,
             (_, Drag::Resize { edges, .. }) => edges.cursor(),
@@ -615,16 +650,7 @@ impl Overlay {
         if !self.awaiting {
             return None;
         }
-        let m = HANDLE_MARGIN;
-        let within_x = p.0 >= sel.x - m && p.0 <= sel.right() + m;
-        let within_y = p.1 >= sel.y - m && p.1 <= sel.bottom() + m;
-        let (dl, dr, dt, db) = ((p.0 - sel.x).abs(), (p.0 - sel.right()).abs(), (p.1 - sel.y).abs(), (p.1 - sel.bottom()).abs());
-        let edges = Edges {
-            left: within_y && dl <= m && dl <= dr,
-            right: within_y && dr <= m && dr < dl,
-            top: within_x && dt <= m && dt <= db,
-            bottom: within_x && db <= m && db < dt,
-        };
+        let edges = edges_at(sel, p, HANDLE_MARGIN);
         if edges.any() {
             Some(Drag::Resize { edges, orig: sel })
         } else if sel.contains(p) {
@@ -688,6 +714,18 @@ impl Overlay {
                     b.1 = p.1;
                 }
                 self.selection = Some(Rect::from_points(a, b));
+            }
+            Drag::Crop { edges, grab, orig } => {
+                if let (Some(ip), Some(bounds)) = (self.to_image(p), self.image_rect()) {
+                    let min = MIN_CROP * self.image_scale();
+                    self.crop = Some(if edges.any() {
+                        resize_rect(orig, edges, ip, bounds, min)
+                    } else {
+                        let x = (orig.x + ip.0 - grab.0).clamp(0.0, bounds.w - orig.w);
+                        let y = (orig.y + ip.1 - grab.1).clamp(0.0, bounds.h - orig.h);
+                        Rect { x, y, ..orig }
+                    });
+                }
             }
             Drag::None | Drag::Draw { .. } => {}
         }
@@ -822,6 +860,13 @@ impl Overlay {
                     self.close_style_panel();
                     None
                 }
+                // Crop: grab an edge, a corner or the inside of the frame. Never draws a new one.
+                _ if self.tool == Tool::Crop => {
+                    if let Some(drag) = self.to_image(p).and_then(|ip| self.crop_handle(ip)) {
+                        self.drag = drag;
+                    }
+                    None
+                }
                 _ => {
                     // Drawing starts on the image; the drag may then leave it and is clamped.
                     match self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
@@ -855,7 +900,12 @@ impl Overlay {
                         }
                     }
                 }
-                if let (Drag::Draw { anchor }, Some(ip)) = (std::mem::replace(&mut self.drag, Drag::None), self.to_image(p)) {
+                let drag = std::mem::replace(&mut self.drag, Drag::None);
+                if let Drag::Crop { .. } = drag {
+                    // Snap to whole pixels; a crop of the whole image is no crop.
+                    self.crop = self.crop.map(|c| c.rounded()).filter(|c| Some(*c) != self.image_rect());
+                }
+                if let (Drag::Draw { anchor }, Some(ip)) = (drag, self.to_image(p)) {
                     let end = self.clamp_image(ip);
                     if let Some(kind) = self.shape_for(anchor, end) {
                         let shape = Annotation { kind, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
@@ -904,7 +954,7 @@ impl Overlay {
                 let rect = Rect::from_points(a, b);
                 (rect.w >= min && rect.h >= min).then_some(if self.tool == Tool::Blur { Kind::Blur(rect) } else { Kind::Highlight(rect) })
             }
-            Tool::Text | Tool::Number => None,
+            Tool::Text | Tool::Number | Tool::Crop => None,
         }
     }
 
@@ -972,6 +1022,12 @@ impl Overlay {
             self.redraw_all(qh);
             return None;
         }
+        // As in Noctalia, Esc drops a crop before it closes the editor.
+        if keysym == Keysym::Escape && self.mode == Mode::Annotate && self.crop.is_some() && self.drag == Drag::None {
+            self.crop = None;
+            self.redraw_all(qh);
+            return None;
+        }
         if keysym == Keysym::Escape {
             return Some(Outcome::Cancel);
         }
@@ -1004,13 +1060,14 @@ impl Overlay {
                     self.redraw_all(qh);
                     None
                 }
-                Keysym::s | Keysym::a | Keysym::t | Keysym::h | Keysym::u | Keysym::n if !mods.ctrl && !mods.alt && !mods.logo => {
+                Keysym::s | Keysym::a | Keysym::t | Keysym::h | Keysym::u | Keysym::n | Keysym::c if !mods.ctrl && !mods.alt && !mods.logo => {
                     self.set_tool(match keysym {
                         Keysym::s => Tool::Rectangle,
                         Keysym::a => Tool::Arrow,
                         Keysym::h => Tool::Highlight,
                         Keysym::u => Tool::Blur,
                         Keysym::n => Tool::Number,
+                        Keysym::c => Tool::Crop,
                         _ => Tool::Text,
                     });
                     self.redraw_all(qh);
@@ -1098,9 +1155,16 @@ impl Overlay {
         }
         let font = gl.font;
         let style = self.picker.as_ref().map(|p| p.state().style.clone()).unwrap_or_default();
+        let crop = self.crop.map(|c| c.rounded());
         match render::export(&mut gl.canvas, font, texture, &editor.image, &self.annotations, scale, &mut s.blurs) {
-            Ok(image) if style.enabled => Outcome::Annotated(style::apply(&image, &style, 1.0), action),
-            Ok(image) => Outcome::Annotated(image, action),
+            Ok(image) => {
+                let image = match crop {
+                    Some(c) => image.crop(c.x as u32, c.y as u32, c.w as u32, c.h as u32),
+                    None => image,
+                };
+                // The style frame wraps the cropped result.
+                Outcome::Annotated(if style.enabled { style::apply(&image, &style, 1.0) } else { image }, action)
+            }
             Err(e) => Outcome::Failed(format!("rendering the annotated image: {e:#}")),
         }
     }
@@ -1295,20 +1359,29 @@ impl Overlay {
                 if let Some(e) = &self.editor {
                     let c = e.canvas;
                     let (cx, cy, cw, ch) = (c.x as f32, c.y as f32, c.w as f32, c.h as f32);
-                    let radius = if style.enabled { (f64::from(style.radius.max(0)) / e.fit) as f32 } else { 0.0 };
+                    // The crop on screen (or the whole image), and the image pixels it covers.
+                    let full = Rect { x: 0.0, y: 0.0, w: f64::from(e.image.width), h: f64::from(e.image.height) };
+                    let crop_px = self.crop.unwrap_or(full);
+                    let d = Rect { x: c.x + crop_px.x / e.fit, y: c.y + crop_px.y / e.fit, w: crop_px.w / e.fit, h: crop_px.h / e.fit };
+                    let cropping = self.tool == Tool::Crop;
+                    // With styling on, show exactly what's exported: just the crop, framed. While
+                    // adjusting the crop, show the whole image so there's something to pull out to.
+                    let clip = if style.enabled && !cropping { d } else { c };
+                    let (kx, ky, kw, kh) = (clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32);
+                    let radius = if style.enabled && !cropping { (f64::from(style.radius.max(0)) / e.fit) as f32 } else { 0.0 };
                     if style.enabled {
                         // The frame (backdrop + shadow), rendered by the export's code at half
                         // device resolution, behind the live image.
                         let device = f64::from(s.phys.0) / f64::from(w);
                         let scale = (device / (e.fit * 2.0)).min(1.0);
-                        let (size, scale_bits) = ((e.image.width, e.image.height), scale.to_bits());
+                        let (size, scale_bits) = ((crop_px.w.round() as u32, crop_px.h.round() as u32), scale.to_bits());
                         let stale = s.style_frame.as_ref().is_none_or(|(k, _)| k.style != style || k.size != size || k.scale != scale_bits);
                         if stale {
                             let key = StyleKey { style: style.clone(), size, scale: scale_bits };
                             if let Some((_, old)) = s.style_frame.take() {
                                 canvas.delete_image(old);
                             }
-                            let standin = Image::new(((f64::from(e.image.width) * scale).round() as u32).max(1), ((f64::from(e.image.height) * scale).round() as u32).max(1));
+                            let standin = Image::new(((f64::from(size.0) * scale).round() as u32).max(1), ((f64::from(size.1) * scale).round() as u32).max(1));
                             let frame = style::apply(&standin, &style, scale);
                             let img = femtovg::imgref::Img::new(rgba_pixels(&frame.data), frame.width as usize, frame.height as usize);
                             if let Ok(id) = canvas.create_image(img.as_ref(), ImageFlags::empty()) {
@@ -1316,27 +1389,55 @@ impl Overlay {
                             }
                         }
                         if let Some((_, frame)) = &s.style_frame {
+                            // The frame wraps the crop, as it does in the export.
                             let pad = (f64::from(style.padding.max(0)) / e.fit) as f32;
-                            let (fx, fy, fw, fh) = (cx - pad, cy - pad, cw + 2.0 * pad, ch + 2.0 * pad);
+                            let (fx, fy, fw, fh) = (d.x as f32 - pad, d.y as f32 - pad, d.w as f32 + 2.0 * pad, d.h as f32 + 2.0 * pad);
                             fill_rect(canvas, fx, fy, fw, fh, Paint::image(*frame, fx, fy, fw, fh, 0.0, 1.0));
                         }
                     }
                     if let Some(tex) = s.texture {
                         let mut path = Path::new();
-                        path.rounded_rect(cx, cy, cw, ch, radius);
+                        path.rounded_rect(kx, ky, kw, kh, radius);
                         canvas.fill_path(&path, &Paint::image(tex, cx, cy, cw, ch, 0.0, 1.0));
                     }
-                    // Annotations are clipped to the image (and its rounded corners), as in the export.
+                    // Annotations are clipped to what's shown (and its rounded corners), as in the export.
                     canvas.save();
-                    canvas.rounded_scissor(cx, cy, cw, ch, radius);
+                    canvas.rounded_scissor(kx, ky, kw, kh, radius);
                     let backdrop = render::Backdrop { size: (e.image.width, e.image.height), blurs: &s.blurs };
                     render::draw_shapes(canvas, font, &shapes, Map { ox: c.x, oy: c.y, fit: e.fit }, e.scale, self.editing, &backdrop);
                     canvas.restore();
-                    if !style.enabled {
+                    if clip == c && (self.crop.is_some() || cropping) {
+                        // Dim what the crop leaves out (Noctalia's crop scrim), within the image.
+                        let dim = Paint::color(femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.65));
+                        let (x0, y0, x1, y1) = (d.x as f32, d.y as f32, d.right() as f32, d.bottom() as f32);
+                        fill_rect(canvas, cx, cy, cw, y0 - cy, dim.clone());
+                        fill_rect(canvas, cx, y1, cw, cy + ch - y1, dim.clone());
+                        fill_rect(canvas, cx, y0, x0 - cx, y1 - y0, dim.clone());
+                        fill_rect(canvas, x1, y0, cx + cw - x1, y1 - y0, dim);
+                    }
+                    if !style.enabled || cropping {
                         // Inset outline separating the image from the surround; never exported.
                         let mut path = Path::new();
                         path.rect(cx + 0.5, cy + 0.5, cw - 1.0, ch - 1.0);
                         canvas.stroke_path(&path, &Paint::color(t.outline.fv()).with_line_width(1.0));
+                    }
+                    if cropping {
+                        // The crop frame: border, edge and corner handles, and its size while dragging.
+                        let (x0, y0, x1, y1) = (d.x as f32, d.y as f32, d.right() as f32, d.bottom() as f32);
+                        let mut path = Path::new();
+                        path.rect(x0 + BORDER_WIDTH / 2.0, y0 + BORDER_WIDTH / 2.0, x1 - x0 - BORDER_WIDTH, y1 - y0 - BORDER_WIDTH);
+                        canvas.stroke_path(&path, &Paint::color(t.primary.fv()).with_line_width(BORDER_WIDTH));
+                        let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                        for (hx, hy) in [(x0, y0), (mx, y0), (x1, y0), (x1, my), (x1, y1), (mx, y1), (x0, y1), (x0, my)] {
+                            let mut dot = Path::new();
+                            dot.circle(hx, hy, HANDLE_RADIUS);
+                            canvas.fill_path(&dot, &Paint::color(t.primary.fv()));
+                            canvas.stroke_path(&dot, &Paint::color(t.surface.fv()).with_line_width(1.5));
+                        }
+                        if let (Drag::Crop { .. }, Some(font), Some(p)) = (self.drag, font, self.pointer) {
+                            let (px, py) = ((p.0 - origin.x) as f32, (p.1 - origin.y) as f32);
+                            draw_badge(canvas, font, t, &format!("{} × {}", crop_px.w.round(), crop_px.h.round()), (px, py), (w, h));
+                        }
                     }
                 }
                 (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, font, w, &fill, &toolbar_state);
@@ -1387,6 +1488,38 @@ fn beside(panel: Rect, surface_w: f32) -> (picker::Placement, f32) {
         let x = (panel.x as f32).clamp(margin, (surface_w - pw - margin).max(margin));
         (picker::Placement::LeftEdge(x), panel.bottom() as f32 + gap)
     }
+}
+
+/// Which edges of `r` are within `margin` of `p` (corners give two).
+fn edges_at(r: Rect, p: (f64, f64), m: f64) -> Edges {
+    let within_x = p.0 >= r.x - m && p.0 <= r.right() + m;
+    let within_y = p.1 >= r.y - m && p.1 <= r.bottom() + m;
+    let (dl, dr, dt, db) = ((p.0 - r.x).abs(), (p.0 - r.right()).abs(), (p.1 - r.y).abs(), (p.1 - r.bottom()).abs());
+    Edges {
+        left: within_y && dl <= m && dl <= dr,
+        right: within_y && dr <= m && dr < dl,
+        top: within_x && dt <= m && dt <= db,
+        bottom: within_x && db <= m && db < dt,
+    }
+}
+
+/// `orig` with the dragged `edges` moved to `p`, kept inside `bounds` and at least `min` across.
+fn resize_rect(orig: Rect, edges: Edges, p: (f64, f64), bounds: Rect, min: f64) -> Rect {
+    let p = (p.0.clamp(bounds.x, bounds.right()), p.1.clamp(bounds.y, bounds.bottom()));
+    let (mut x0, mut y0, mut x1, mut y1) = (orig.x, orig.y, orig.right(), orig.bottom());
+    if edges.left {
+        x0 = p.0.min(x1 - min);
+    }
+    if edges.right {
+        x1 = p.0.max(x0 + min);
+    }
+    if edges.top {
+        y0 = p.1.min(y1 - min);
+    }
+    if edges.bottom {
+        y1 = p.1.max(y0 + min);
+    }
+    Rect::from_points((x0, y0), (x1, y1))
 }
 
 fn present(s: &mut Surf, qh: &QueueHandle<App>) -> anyhow::Result<()> {
@@ -1525,6 +1658,7 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Tool(Tool::Highlight) => "Highlight (h) · hold to choose the colour",
         Hit::Tool(Tool::Blur) => "Blur (u)",
         Hit::Tool(Tool::Number) => "Numbering (n) · click to place the next number",
+        Hit::Tool(Tool::Crop) => "Crop (c) · drag the edges · Esc resets",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
         Hit::SizePreset(1) => "Medium",
@@ -1554,6 +1688,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
         Button(Hit::Tool(Tool::Highlight)),
         Button(Hit::Tool(Tool::Blur)),
         Button(Hit::Tool(Tool::Number)),
+        Button(Hit::Tool(Tool::Crop)),
     ];
     // The colour panel only matters for tools that paint with it (or the style backdrop).
     if st.show_color {
@@ -1771,6 +1906,15 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             star(&mut path, x + 6.5, y + 9.0, 5.5);
             star(&mut path, x + 12.5, y + 3.5, 2.5);
         }
+        Hit::Tool(Tool::Crop) => {
+            // Tabler crop: two interlocking corners.
+            path.move_to(x + 4.5, y + 1.5);
+            path.line_to(x + 4.5, y + 11.5);
+            path.line_to(x + 14.5, y + 11.5);
+            path.move_to(x + 1.5, y + 4.5);
+            path.line_to(x + 11.5, y + 4.5);
+            path.line_to(x + 11.5, y + 14.5);
+        }
         Hit::Tool(Tool::Number) => {
             // A circled 1.
             path.circle(x + 8.0, y + 8.0, 6.5);
@@ -1881,6 +2025,26 @@ mod tests {
 
     fn panel(x: f64) -> Rect {
         Rect { x, y: 68.0, w: 304.0, h: 294.0 }
+    }
+
+    #[test]
+    fn crop_edges_drag_within_bounds() {
+        let image = Rect { x: 0.0, y: 0.0, w: 900.0, h: 500.0 };
+        // Near the left edge and the top-left corner.
+        let left = edges_at(image, (5.0, 250.0), 15.0);
+        assert!(left.left && !left.top && !left.right);
+        let corner = edges_at(image, (3.0, 4.0), 15.0);
+        assert!(corner.left && corner.top);
+        assert!(!edges_at(image, (450.0, 250.0), 15.0).any(), "the middle isn't an edge");
+
+        // Pull the left edge in, then try to drag it past the right edge: stops at the minimum.
+        let r = resize_rect(image, left, (100.0, 250.0), image, 8.0);
+        assert_eq!(r, Rect { x: 100.0, y: 0.0, w: 800.0, h: 500.0 });
+        let r = resize_rect(r, left, (2000.0, 250.0), image, 8.0);
+        assert_eq!((r.x, r.w), (892.0, 8.0));
+        // Corners move two edges; dragging outside the image clamps to it.
+        let r = resize_rect(image, Edges { right: true, bottom: true, ..Edges::default() }, (2000.0, -50.0), image, 8.0);
+        assert_eq!(r, Rect { x: 0.0, y: 0.0, w: 900.0, h: 8.0 });
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum Tool {
     Highlight,
     Blur,
     Number,
+    /// Not a drawing tool: shows the crop frame, adjusted by dragging its edges.
+    Crop,
 }
 
 /// Noctalia's highlighter opacity.
@@ -35,7 +37,7 @@ pub const HIGHLIGHT_COLORS: [(&str, Color); 5] = [
 ];
 
 impl Tool {
-    pub const ALL: [Tool; 6] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur, Tool::Number];
+    pub const ALL: [Tool; 7] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur, Tool::Number, Tool::Crop];
 
 
     /// Key in the state file.
@@ -47,6 +49,7 @@ impl Tool {
             Tool::Highlight => "highlight",
             Tool::Blur => "blur",
             Tool::Number => "number",
+            Tool::Crop => "crop",
         }
     }
 
@@ -57,13 +60,13 @@ impl Tool {
 
     /// Paints with the colour panel's fill. Highlight has its own colour; blur has none.
     pub fn uses_fill(self) -> bool {
-        !matches!(self, Tool::Highlight | Tool::Blur)
+        !matches!(self, Tool::Highlight | Tool::Blur | Tool::Crop)
     }
 
     /// Highlights are plain filled boxes and blurs use one fixed strength, so neither has a size
     /// control.
     pub fn has_size(self) -> bool {
-        !matches!(self, Tool::Highlight | Tool::Blur)
+        !matches!(self, Tool::Highlight | Tool::Blur | Tool::Crop)
     }
 
     /// Stroke width in logical pixels; for text the font size, for numbers the marker diameter, for
@@ -72,7 +75,7 @@ impl Tool {
         match self {
             Tool::Rectangle | Tool::Arrow => 6.0,
             Tool::Text | Tool::Highlight => 24.0,
-            Tool::Blur | Tool::Number => 32.0,
+            Tool::Blur | Tool::Number | Tool::Crop => 32.0,
         }
     }
 

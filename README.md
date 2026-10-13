@@ -68,6 +68,9 @@ draw on the image:
 - **Numbering**: click to drop a numbered marker: 1, 2, 3… in the order placed. Undo renumbers the
   rest. The size controls set the diameter (S / M / L = 16 / 32 / 64); the number is black on
   light colours and white on dark ones.
+- **Crop**: shows a frame around the whole image. Drag its edges or corners to crop, or drag
+  inside to move the crop. What's left out is dimmed, and cut off when you export. Esc resets the
+  crop. With a screenshot style on, the frame wraps the cropped result.
 - **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
   the text you're typing. Size and colour changes apply to the text under the caret.
 
@@ -82,7 +85,8 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | Ctrl+S | Save to file |
 | Ctrl+Z / ↶ | Undo the last annotation |
 | Ctrl+Shift+Z or Ctrl+Y / ↷ | Redo (until you draw something new) |
-| `s` / `a` / `t` / `h` / `u` / `n` | Rectangle / arrow / text / highlight / blur / numbering tool |
+| `s` / `a` / `t` / `h` / `u` / `n` / `c` | Rectangle / arrow / text / highlight / blur / numbering / crop |
+| Esc (with a crop) | Reset the crop (before closing the editor) |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
 
@@ -98,7 +102,7 @@ shadow blur / opacity / X and Y offset are sliders (in image pixels; defaults 64
 
 #### Toolbar
 
-Undo, redo · Rectangle, arrow, text, highlight, blur, numbering, colour · S / M / L sizes (½×, 1×, 2× the
+Undo, redo · Rectangle, arrow, text, highlight, blur, numbering, crop, colour · S / M / L sizes (½×, 1×, 2× the
 tool's default: 6px strokes, 24px text, 32px markers; hidden for highlight and blur) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
 tooltip. The style button (✦) sits just before Copy. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
