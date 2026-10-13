@@ -344,7 +344,11 @@ impl Overlay {
         self.commit_text();
         self.tool = tool;
         if let Some(p) = &mut self.picker {
-            p.state_mut().tool = tool;
+            // Crop is a mode you pass through, not a tool to come back to, so the saved tool stays
+            // the last drawing tool.
+            if tool.remembered() {
+                p.state_mut().tool = tool;
+            }
             // Its button is hidden for tools that don't use it.
             if !tool.uses_fill() && p.open {
                 p.close();
@@ -1041,6 +1045,14 @@ impl Overlay {
                     self.redraw_all(qh);
                     None
                 }
+                // In Crop, Enter applies the crop: back to the last drawing tool, which shows the
+                // cropped (and styled) result. Enter again then delivers as usual.
+                Keysym::Return | Keysym::KP_Enter if !mods.ctrl && self.tool == Tool::Crop => {
+                    let tool = self.picker.as_ref().map(|p| p.state().tool).unwrap_or_default();
+                    self.set_tool(tool);
+                    self.redraw_all(qh);
+                    None
+                }
                 Keysym::Return | Keysym::KP_Enter if !mods.ctrl => Some(self.annotated(Action::Default)),
                 Keysym::c | Keysym::C if mods.ctrl => Some(self.annotated(Action::Copy)),
                 Keysym::s | Keysym::S if mods.ctrl => Some(self.annotated(Action::Save)),
@@ -1365,11 +1377,13 @@ impl Overlay {
                     let d = Rect { x: c.x + crop_px.x / e.fit, y: c.y + crop_px.y / e.fit, w: crop_px.w / e.fit, h: crop_px.h / e.fit };
                     let cropping = self.tool == Tool::Crop;
                     // With styling on, show exactly what's exported: just the crop, framed. While
-                    // adjusting the crop, show the whole image so there's something to pull out to.
-                    let clip = if style.enabled && !cropping { d } else { c };
+                    // adjusting the crop, show the plain whole image instead (no frame), so there's
+                    // something to pull the edges out to and no backdrop half-hidden behind it.
+                    let styled = style.enabled && !cropping;
+                    let clip = if styled { d } else { c };
                     let (kx, ky, kw, kh) = (clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32);
-                    let radius = if style.enabled && !cropping { (f64::from(style.radius.max(0)) / e.fit) as f32 } else { 0.0 };
-                    if style.enabled {
+                    let radius = if styled { (f64::from(style.radius.max(0)) / e.fit) as f32 } else { 0.0 };
+                    if styled {
                         // The frame (backdrop + shadow), rendered by the export's code at half
                         // device resolution, behind the live image.
                         let device = f64::from(s.phys.0) / f64::from(w);
@@ -1658,7 +1672,7 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Tool(Tool::Highlight) => "Highlight (h) · hold to choose the colour",
         Hit::Tool(Tool::Blur) => "Blur (u)",
         Hit::Tool(Tool::Number) => "Numbering (n) · click to place the next number",
-        Hit::Tool(Tool::Crop) => "Crop (c) · drag the edges · Esc resets",
+        Hit::Tool(Tool::Crop) => "Crop (c) · drag the edges · Enter applies · Esc resets",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
         Hit::SizePreset(1) => "Medium",

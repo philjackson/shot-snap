@@ -70,7 +70,9 @@ draw on the image:
   light colours and white on dark ones.
 - **Crop**: shows a frame around the whole image. Drag its edges or corners to crop, or drag
   inside to move the crop. What's left out is dimmed, and cut off when you export. Esc resets the
-  crop. With a screenshot style on, the frame wraps the cropped result.
+  crop. Enter applies it: you're back on your last drawing tool, looking at the cropped result (with
+  the screenshot style's frame, if it's on), and Enter again saves as usual. While Crop is selected
+  the plain image is shown. Nothing about cropping is remembered between sessions.
 - **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
   the text you're typing. Size and colour changes apply to the text under the caret.
 
@@ -86,6 +88,7 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | Ctrl+Z / ↶ | Undo the last annotation |
 | Ctrl+Shift+Z or Ctrl+Y / ↷ | Redo (until you draw something new) |
 | `s` / `a` / `t` / `h` / `u` / `n` / `c` | Rectangle / arrow / text / highlight / blur / numbering / crop |
+| Enter (in Crop) | Apply the crop and preview the result; Enter again to finish |
 | Esc (with a crop) | Reset the crop (before closing the editor) |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |

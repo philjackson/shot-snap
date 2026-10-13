@@ -63,6 +63,12 @@ impl Tool {
         !matches!(self, Tool::Highlight | Tool::Blur | Tool::Crop)
     }
 
+    /// Remembered as the tool to reopen the editor with. Nothing about cropping is kept between
+    /// sessions: the crop itself lives only as long as the editor, and so does choosing Crop.
+    pub fn remembered(self) -> bool {
+        self != Tool::Crop
+    }
+
     /// Highlights are plain filled boxes and blurs use one fixed strength, so neither has a size
     /// control.
     pub fn has_size(self) -> bool {

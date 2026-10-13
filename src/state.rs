@@ -102,8 +102,16 @@ fn path() -> PathBuf {
 
 /// A missing or unreadable state file just means starting fresh.
 pub fn load() -> State {
-    let mut state: State = std::fs::read_to_string(path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
+    let state: State = std::fs::read_to_string(path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
+    sanitized(state)
+}
+
+/// Drops what shouldn't be (or can no longer be) restored from a state file.
+fn sanitized(mut state: State) -> State {
     let a = &mut state.annotate;
+    if !a.tool.remembered() {
+        a.tool = Tool::default();
+    }
     a.recent_solids.truncate(RECENT_LIMIT);
     // Widths for tools without a size control (e.g. from older versions) mean nothing.
     a.tool_widths.retain(|name, _| Tool::ALL.iter().any(|t| t.has_size() && t.name() == name));
@@ -204,6 +212,10 @@ mod tests {
         h.highlight_color = HIGHLIGHT_COLORS[1].1;
         let back: State = toml::from_str(&toml::to_string(&State { annotate: h, ..Default::default() }).unwrap()).unwrap();
         assert_eq!(back.annotate.highlight_color, HIGHLIGHT_COLORS[1].1);
+
+        // Cropping is never restored: a saved crop tool comes back as the default drawing tool.
+        let saved: State = toml::from_str("[annotate]\ntool = \"crop\"\n").unwrap();
+        assert_eq!(sanitized(saved).annotate.tool, Tool::Rectangle);
 
         // Blur has no size control: it stays at 32 whatever is asked or stored.
         let mut a = AnnotateState::default();
