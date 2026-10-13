@@ -19,6 +19,7 @@ pub enum Tool {
     Text,
     Highlight,
     Blur,
+    Number,
 }
 
 /// Noctalia's highlighter opacity.
@@ -34,7 +35,7 @@ pub const HIGHLIGHT_COLORS: [(&str, Color); 5] = [
 ];
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur];
+    pub const ALL: [Tool; 6] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur, Tool::Number];
 
 
     /// Key in the state file.
@@ -45,6 +46,7 @@ impl Tool {
             Tool::Text => "text",
             Tool::Highlight => "highlight",
             Tool::Blur => "blur",
+            Tool::Number => "number",
         }
     }
 
@@ -64,19 +66,20 @@ impl Tool {
         !matches!(self, Tool::Highlight | Tool::Blur)
     }
 
-    /// Stroke width in logical pixels; for text the font size, for blur the fixed strength (sigma,
-    /// Noctalia's default).
+    /// Stroke width in logical pixels; for text the font size, for numbers the marker diameter, for
+    /// blur the fixed strength (sigma, Noctalia's default).
     pub fn default_width(self) -> f64 {
         match self {
             Tool::Rectangle | Tool::Arrow => 6.0,
             Tool::Text | Tool::Highlight => 24.0,
-            Tool::Blur => 32.0,
+            Tool::Blur | Tool::Number => 32.0,
         }
     }
 
     pub fn width_range(self) -> (f64, f64) {
         match self {
             Tool::Text => (8.0, 200.0),
+            Tool::Number => (12.0, 120.0),
             _ => (1.0, 100.0),
         }
     }
@@ -117,6 +120,9 @@ pub enum Kind {
     Highlight(Rect),
     /// A box showing the image blurred; `Shape::width` is the blur sigma.
     Blur(Rect),
+    /// A numbered marker centred on `at`, `Shape::width` across. Its number is its position among
+    /// the markers, so removing one renumbers the rest.
+    Number { at: Point },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +172,7 @@ impl Shape {
                 Some(Rect { x: x0 - h, y: y0 - h, w: x1 - x0 + self.width, h: y1 - y0 + self.width })
             }
             Kind::Highlight(r) => Some(*r),
+            Kind::Number { at } => Some(Rect { x: at.0 - h, y: at.1 - h, w: self.width, h: self.width }),
             Kind::Text { .. } | Kind::Blur(_) => None,
         }
     }
@@ -204,5 +211,11 @@ mod tests {
         // Wings reach 15 px either side of the shaft, plus half the stroke.
         assert!((b.y + 20.0).abs() < 1e-9 && (b.bottom() - 20.0).abs() < 1e-9, "{b:?}");
         assert!((b.x + 5.0).abs() < 1e-9 && (b.right() - 105.0).abs() < 1e-9, "{b:?}");
+    }
+
+    #[test]
+    fn number_marker_bounds_are_its_circle() {
+        let shape = Shape { kind: Kind::Number { at: (50.0, 40.0) }, width: 32.0, fill: Fill::default() };
+        assert_eq!(shape.stroke_bounds(1.0), Some(Rect { x: 34.0, y: 24.0, w: 32.0, h: 32.0 }));
     }
 }

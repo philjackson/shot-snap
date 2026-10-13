@@ -54,6 +54,9 @@ draw on the image:
 - **Blur**: drag a box; what's under it is blurred (fixed strength: Noctalia's sigma of 32 px).
   Blurs always sit under the other annotations, so blurring a region never hides an arrow or label
   you've added.
+- **Numbering**: click to drop a numbered marker: 1, 2, 3… in the order placed. Undo renumbers the
+  rest. The size controls set the diameter (S / M / L = 16 / 32 / 64); the number is black on
+  light colours and white on dark ones.
 - **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
   the text you're typing. Size and colour changes apply to the text under the caret.
 
@@ -67,22 +70,22 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
 | Ctrl+Z / ↶ | Undo the last annotation |
-| `s` / `a` / `t` / `h` / `u` | Rectangle / arrow / text / highlight / blur tool |
+| `s` / `a` / `t` / `h` / `u` / `n` | Rectangle / arrow / text / highlight / blur / numbering tool |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
 
 #### Toolbar
 
-Undo · Rectangle, arrow, text, highlight, blur, colour · S / M / L sizes (½×, 1×, 2× the tool's
-default: 6px strokes, 24px text; hidden for highlight and blur) · fine size
+Undo · Rectangle, arrow, text, highlight, blur, numbering, colour · S / M / L sizes (½×, 1×, 2× the
+tool's default: 6px strokes, 24px text, 32px markers; hidden for highlight and blur) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
 tooltip. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
 stepper is showing are remembered between runs (all in the state file).
 
 #### Colours and gradients
 
-The swatch button after the tools opens the colour panel. Rectangles, arrows and text use whatever
-it shows. Highlight has its own colour and blur needs none, so the button is hidden for those.
+The swatch button after the tools opens the colour panel. Rectangles, arrows, text and numbered
+markers use whatever it shows. Highlight has its own colour and blur needs none, so the button is hidden for those.
 
 - **Solid**: 5 built-in colours, your 10 most recent picks, and a saturation/value square with a
   hue bar for anything else.

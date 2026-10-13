@@ -709,6 +709,11 @@ impl Overlay {
                     // Drawing starts on the image; the drag may then leave it and is clamped.
                     match self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
                         Some(ip) if self.tool == Tool::Text => self.start_text(ip),
+                        Some(ip) if self.tool == Tool::Number => {
+                            self.commit_text();
+                            let shape = Annotation { kind: Kind::Number { at: ip }, width: self.tool_width() * self.image_scale(), fill: self.current_fill() };
+                            self.annotations.push(shape);
+                        }
                         Some(ip) => {
                             self.commit_text();
                             self.drag = Drag::Draw { anchor: ip };
@@ -781,7 +786,7 @@ impl Overlay {
                 let rect = Rect::from_points(a, b);
                 (rect.w >= min && rect.h >= min).then_some(if self.tool == Tool::Blur { Kind::Blur(rect) } else { Kind::Highlight(rect) })
             }
-            Tool::Text => None,
+            Tool::Text | Tool::Number => None,
         }
     }
 
@@ -871,12 +876,13 @@ impl Overlay {
                     self.redraw_all(qh);
                     None
                 }
-                Keysym::s | Keysym::a | Keysym::t | Keysym::h | Keysym::u if !mods.ctrl && !mods.alt && !mods.logo => {
+                Keysym::s | Keysym::a | Keysym::t | Keysym::h | Keysym::u | Keysym::n if !mods.ctrl && !mods.alt && !mods.logo => {
                     self.set_tool(match keysym {
                         Keysym::s => Tool::Rectangle,
                         Keysym::a => Tool::Arrow,
                         Keysym::h => Tool::Highlight,
                         Keysym::u => Tool::Blur,
+                        Keysym::n => Tool::Number,
                         _ => Tool::Text,
                     });
                     self.redraw_all(qh);
@@ -1259,6 +1265,7 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Tool(Tool::Text) => "Text (t) · click to type, Enter to finish",
         Hit::Tool(Tool::Highlight) => "Highlight (h) · hold to choose the colour",
         Hit::Tool(Tool::Blur) => "Blur (u)",
+        Hit::Tool(Tool::Number) => "Numbering (n) · click to place the next number",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
         Hit::SizePreset(1) => "Medium",
@@ -1285,6 +1292,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
         Button(Hit::Tool(Tool::Text)),
         Button(Hit::Tool(Tool::Highlight)),
         Button(Hit::Tool(Tool::Blur)),
+        Button(Hit::Tool(Tool::Number)),
     ];
     // The colour panel only matters for tools that paint with it.
     if st.tool.uses_fill() {
@@ -1484,6 +1492,13 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
     let mut path = Path::new();
     match hit {
         Hit::Tool(Tool::Rectangle) => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
+        Hit::Tool(Tool::Number) => {
+            // A circled 1.
+            path.circle(x + 8.0, y + 8.0, 6.5);
+            path.move_to(x + 6.5, y + 6.0);
+            path.line_to(x + 8.25, y + 4.75);
+            path.line_to(x + 8.25, y + 11.25);
+        }
         Hit::Tool(Tool::Blur) => {
             // Tabler blur: a circle fading into lines.
             path.circle(x + 8.0, y + 8.0, 6.0);

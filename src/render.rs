@@ -110,10 +110,34 @@ pub fn draw_shapes(canvas: &mut Canvas<OpenGl>, font: Option<FontId>, shapes: &[
             fill_rect(canvas, r.x as f32, r.y as f32, r.w as f32, r.h as f32, Paint::image(blurred, ox, oy, iw, ih, 0.0, 1.0));
         }
     }
+    let mut number = 0;
     for (i, shape) in shapes.iter().enumerate() {
         let line_width = (shape.width / map.fit) as f32;
         match &shape.kind {
             Kind::Blur(_) => {}
+            Kind::Number { at } => {
+                number += 1;
+                let (cx, cy) = map.pt(*at);
+                let r = line_width / 2.0;
+                let mut circle = Path::new();
+                circle.circle(cx, cy, r);
+                let bounds = map.rect(shape.stroke_bounds(scale).unwrap_or_default());
+                canvas.fill_path(&circle, &shape.fill.paint(bounds));
+                if let Some(font) = font {
+                    // Noctalia: 60% of the diameter, black on light fills and white on dark ones.
+                    let base = match &shape.fill {
+                        crate::paint::Fill::Solid(c) => *c,
+                        crate::paint::Fill::Gradient(g) => g.sample(0.5),
+                    };
+                    let luminance = 0.299 * base.r + 0.587 * base.g + 0.114 * base.b;
+                    let ink = if luminance > 0.5 { femtovg::Color::black() } else { femtovg::Color::white() };
+                    let mut paint = Paint::color(ink).with_font(&[font]).with_font_size(line_width * 0.6);
+                    paint.set_text_baseline(Baseline::Middle);
+                    let label = number.to_string();
+                    let tw = canvas.measure_text(0.0, 0.0, &label, &paint).map(|m| m.width()).unwrap_or(0.0);
+                    let _ = canvas.fill_text(cx - tw / 2.0, cy, &label, &paint);
+                }
+            }
             Kind::Highlight(r) => {
                 let r = map.rect(*r);
                 canvas.save();
