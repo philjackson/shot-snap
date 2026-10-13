@@ -15,6 +15,7 @@ mod overlay;
 mod paint;
 mod picker;
 mod render;
+mod sound;
 mod state;
 mod style;
 mod style_panel;

@@ -20,6 +20,10 @@ pub struct Config {
     pub pipe_command: String,
     /// Show a notification, with a preview, when a screenshot is copied to the clipboard.
     pub notify: bool,
+    /// Play the sound theme's `screen-capture` sound when a screenshot is saved.
+    pub sound: bool,
+    pub sound_volume: f32,
+    pub sound_theme: String,
     pub theme: Theme,
 }
 
@@ -36,6 +40,9 @@ impl Default for Config {
             show_cursor: false,
             pipe_command: String::new(),
             notify: true,
+            sound: true,
+            sound_volume: 0.5,
+            sound_theme: "freedesktop".into(),
             theme: Theme::default(),
         }
     }

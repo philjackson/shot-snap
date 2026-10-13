@@ -547,6 +547,9 @@ impl App {
     fn delivery_finished(&mut self, result: anyhow::Result<Delivered>) {
         let response = match result {
             Ok(delivered) => {
+                if delivered.saved.is_some() && self.config.sound {
+                    crate::sound::capture(&self.config.sound_theme, self.config.sound_volume);
+                }
                 let clip = match (delivered.clipboard, self.seat.clone()) {
                     (Some(png), Some(seat)) => {
                         let result = self.clipboard.set(png.clone(), &seat, &self.qh);

@@ -112,6 +112,9 @@ confirm_region       = false   # adjust the selection before capturing
 remember_last_region = false   # start with the previous selection
 show_cursor          = false   # include the mouse pointer
 notify               = true    # notification with a preview when copied to the clipboard
+sound                = true    # shutter sound when a screenshot is saved
+sound_volume         = 0.5
+sound_theme          = "freedesktop"
 pipe_command         = ""      # e.g. 'satty -f -'; the PNG is sent on stdin
 
 [theme]
