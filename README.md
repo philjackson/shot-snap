@@ -1,138 +1,51 @@
 # shot-snap
 
-Fast Wayland screenshots with the look and feel of the [Noctalia](https://github.com/noctalia-dev) shell's
-built-in capture: a frozen, dimmed overlay, drag-to-select, a size badge, and a display picker.
+Fast screenshots for Wayland, with a built-in annotation editor.
 
-Needs a compositor with `wlr-layer-shell` and `wlr-screencopy` (Hyprland, Niri, Sway, river, …).
-Clipboard copies need `ext-data-control` or `wlr-data-control`.
+Works on compositors with `wlr-layer-shell` and `wlr-screencopy`: Hyprland, Sway, Niri, river and
+others.
 
 ## Usage
 
 ```sh
-shot-snap region                 # drag to select; release to capture
-shot-snap fullscreen             # focused monitor
-shot-snap fullscreen pick        # choose a monitor (immediate on single-monitor setups)
-shot-snap fullscreen DP-2        # one output: connector name, or a word from its description
-shot-snap fullscreen all         # every monitor in one image
-shot-snap window                 # the focused window
-shot-snap window pick            # hover to highlight a window, click to capture it
-shot-snap quit                   # stop the daemon
-
-shot-snap region --annotate      # -a / --annotate: edit the capture before it's saved or copied
-shot-snap fullscreen DP-2 -a
-shot-snap window pick -a
+shot-snap region             # drag to select an area
+shot-snap fullscreen         # the focused monitor
+shot-snap fullscreen pick    # choose a monitor
+shot-snap fullscreen DP-2    # a specific monitor
+shot-snap fullscreen all     # all monitors in one image
+shot-snap window             # the focused window
+shot-snap window pick        # click a window
 ```
 
-Window capture asks the compositor where windows are (Hyprland, Sway and Niri are supported). Where
-the compositor can capture a single window (`ext-image-copy-capture` with toplevel sources, e.g.
-Hyprland and Sway 1.11+), you get just that window, even if other windows are on top of it. That
-means no compositor border, rounded corners or shadow, and popup menus aren't included. Otherwise,
-or if the window can't be matched for certain, its area of the screen is captured, overlaps and
-all. On Hyprland windows are matched exactly; elsewhere by title and app id. Only windows on the
-workspaces currently shown can be picked.
+Add `-a` (`--annotate`) to any of these to edit the screenshot before it's saved.
 
-The first command starts a small background daemon (`shot-snap daemon`) that stays resident, so
-later captures are instant and the clipboard keeps serving the image after the overlay closes.
-Run `shot-snap daemon` yourself (e.g. `exec-once`) to start it early or to see its logs.
-After rebuilding, `shot-snap --restart-daemon` swaps the running daemon for the new binary. It works
-on its own or in front of any command (`shot-snap --restart-daemon region -a`). To run a second,
-separate daemon (e.g. for testing next to your own), point both it and its clients at another socket
-with `SHOTSNAP_SOCKET=/path/to.sock`.
+Screenshots are saved to your Pictures folder and copied to the clipboard. The saved path is
+printed. The exit status is `0` on success, `1` on error and `2` if you cancel.
 
-The client prints the saved path (if any) and exits `0` done, `1` error, `2` cancelled.
+shot-snap keeps a small background process running so captures are instant. It starts
+automatically; after updating shot-snap, run `shot-snap --restart-daemon` once.
 
-### Keys in the region overlay
+### Selecting a region
+
+Drag to select. Press Esc to cancel.
+
+With `confirm_region` or `remember_last_region` on, the selection stays adjustable: drag its edges
+or corners to resize it, drag inside to move it, or drag outside to start again. Then:
 
 | Key | Action |
 |---|---|
-| Esc | Cancel |
-| Enter / Space | Capture with the configured outputs (when confirming a region) |
-| Ctrl+C | Copy to clipboard only (when confirming a region) |
-| Ctrl+S | Save to file only (when confirming a region) |
+| Enter / Space | Capture |
+| Ctrl+C | Copy only |
+| Ctrl+S | Save only |
 
-While confirming, drag the edges or corners to resize, drag inside to move, or drag outside to
-start again.
+### Windows
 
-### Annotation
+`window pick` highlights the window under the pointer; click to capture it. Where the compositor
+supports it (such as Hyprland), you get just that window even if others overlap it, without its
+border or shadow. Otherwise the area of the screen it covers is captured. Window capture works on
+Hyprland, Sway and Niri.
 
-Add `--annotate` (or `-a`) to `region` or `fullscreen` to open the editor on the captured image
-before it's delivered. The editor appears on the monitor the capture came from, with
-the image centred under a toolbar at the top (1:1, scaled down if it doesn't fit). Pick a tool and
-draw on the image:
-
-- **Rectangle**: drag.
-- **Arrow**: drag from tail to tip. Hold the arrow button to choose where the heads go: at the
-  end, at the start, or both. The choice is remembered.
-- **Highlight**: drag a box; it's filled with the highlighter's own colour at 45% opacity. Yellow
-  by default; hold the highlight button to pick yellow, blue, red, green or orange. The choice is
-  remembered.
-- **Blur**: drag a box; what's under it is blurred (fixed strength: Noctalia's sigma of 32 px).
-  Blurs always sit under the other annotations, so blurring a region never hides an arrow or label
-  you've added.
-- **Numbering**: click to drop a numbered marker: 1, 2, 3… in the order placed. Undo renumbers the
-  rest. The size controls set the diameter (S / M / L = 16 / 32 / 64); the number is black on
-  light colours and white on dark ones.
-- **Crop**: shows a frame around the whole image. Drag its edges or corners to crop, or drag
-  inside to move the crop. What's left out is dimmed, and cut off when you export. Esc resets the
-  crop. Enter applies it: you're back on your last drawing tool, looking at the cropped result (with
-  the screenshot style's frame, if it's on), and Enter again saves as usual. While Crop is selected
-  the plain image is shown. Nothing about cropping is remembered between sessions.
-- **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
-  the text you're typing. Size and colour changes apply to the text under the caret.
-
-Copy, Save and Done (✓) export the capture with the annotations drawn in, and the editor closes.
-The export uses the same renderer as the editor, so it matches what you see exactly.
-
-| Key | Action |
-|---|---|
-| Esc / ✕ | Close the colour panel, or close the editor without saving |
-| Enter / ✓ | Done: use the configured outputs |
-| Ctrl+C | Copy to clipboard |
-| Ctrl+S | Save to file |
-| Ctrl+Z / ↶ | Undo the last annotation |
-| Ctrl+Shift+Z or Ctrl+Y / ↷ | Redo (until you draw something new) |
-| `s` / `a` / `t` / `h` / `u` / `n` / `c` | Rectangle / arrow / text / highlight / blur / numbering / crop |
-| Enter (in Crop) | Apply the crop and preview the result; Enter again to finish |
-| Esc (with a crop) | Reset the crop (before closing the editor) |
-| `[` / `]` | Thinner / thicker by 1px |
-| Delete | Remove the selected gradient stop (colour panel open) |
-
-#### Screenshot style
-
-The sparkles button (✦) opens the style panel, after Noctalia's. **Style screenshot** puts the
-capture on a padded backdrop with rounded corners and a soft drop shadow, previewed live around the
-image. The backdrop has its own colour: click the swatch next to **Background** to change it with
-the same colour selector (solid or gradient, sharing the recent picks). It starts as Noctalia's
-theme gradient. **Background** turns the backdrop off for a transparent frame. Padding, corner radius and
-shadow blur / opacity / X and Y offset are sliders (in image pixels; defaults 64, 12, 40, 50%, 0,
-16). Copy, Save and Done deliver the styled image. Settings are remembered in the state file.
-
-#### Toolbar
-
-Undo, redo · Rectangle, arrow, text, highlight, blur, numbering, crop, colour · S / M / L sizes (½×, 1×, 2× the
-tool's default: 6px strokes, 24px text, 32px markers; hidden for highlight and blur) · fine size
-adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
-tooltip. The style button (✦) sits just before Copy. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
-stepper is showing are remembered between runs (all in the state file).
-
-#### Colours and gradients
-
-The swatch button after the tools opens the colour panel. Rectangles, arrows, text and numbered
-markers use whatever it shows. Highlight has its own colour and blur needs none, so the button is hidden for those.
-
-- **Solid**: 5 built-in colours, your 10 most recent picks, and a saturation/value square with a
-  hue bar for anything else.
-- **Gradient**: 5 built-in gradients, your 10 most recent, and an editor. Click the bar to add a
-  stop. Drag a stop to move it, or drag it down off the bar (or press Delete) to remove it; there
-  are always at least two. Click a stop to recolour it with the square and hue bar. The angle
-  slider works like CSS (0° points up, 90° right), in 5° steps. A gradient spans each rectangle's
-  outer edge.
-
-A pick counts as recent when you close the panel or the editor; the built-ins are never added.
-Recents and the current paint are kept in `$XDG_STATE_HOME/shot-snap/state.toml`
-(`~/.local/state/…`), not in the config.
-
-### Hyprland example
+### Example key bindings (Hyprland)
 
 ```ini
 bind = , Print, exec, shot-snap region
@@ -142,22 +55,65 @@ bind = ALT, Print, exec, shot-snap region --annotate
 bind = SUPER, Print, exec, shot-snap window pick
 ```
 
+## Annotating
+
+The editor opens with your screenshot under a toolbar. Hover over any button for a tip.
+
+| Tool | Key | How |
+|---|---|---|
+| Rectangle | `s` | Drag |
+| Arrow | `a` | Drag from tail to tip. Hold the button to put heads on the end, the start or both |
+| Text | `t` | Click and type. Enter finishes, Esc discards |
+| Highlight | `h` | Drag a box. Hold the button to pick its colour |
+| Blur | `u` | Drag a box over anything you want hidden |
+| Numbering | `n` | Click to place 1, 2, 3… |
+| Crop | `c` | Drag the frame's edges or corners. Enter applies it, Esc resets it |
+
+S / M / L set the size of the current tool; the sliders button next to them, or `[` and `]`,
+gives finer control.
+
+| Key | Action |
+|---|---|
+| Enter / ✓ | Save and copy |
+| Ctrl+C | Copy |
+| Ctrl+S | Save |
+| Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
+| Esc / ✕ | Close without saving |
+
+### Colours
+
+The colour button opens a picker with two tabs:
+
+- **Solid**: a few presets, your recent colours, and a picker for anything else.
+- **Gradient**: presets, your recent gradients, and an editor. Click the bar to add a colour stop,
+  drag a stop to move it, drag it off the bar (or press Delete) to remove it, and use the slider
+  to set the angle.
+
+### Screenshot style
+
+The ✦ button frames the screenshot for sharing: a padded background with rounded corners and a
+drop shadow. Click the swatch next to **Background** to choose its colour or gradient, and use
+the sliders for padding, corners and the shadow. With a crop, the frame goes around the cropped
+result.
+
+Your tools, colours and style settings are remembered for next time.
+
 ## Configuration
 
-`~/.config/shot-snap/config.toml` (all optional; re-read on every capture):
+Optional, in `~/.config/shot-snap/config.toml`:
 
 ```toml
-save_to_file         = true    # write a PNG
-directory            = ""      # empty = XDG_PICTURES_DIR, else ~/Pictures
-filename_pattern     = ""      # strftime; empty = screenshot_%Y%m%d_%H%M%S (".png" appended)
+save_to_file         = true    # save a PNG
+directory            = ""      # default: your Pictures folder
+filename_pattern     = ""      # strftime pattern; default: screenshot_%Y%m%d_%H%M%S
 copy_to_clipboard    = true
-freeze_screen        = true    # freeze the desktop before selecting
-confirm_region       = false   # keep the region adjustable until Enter/Space/Ctrl+C/Ctrl+S
-remember_last_region = false   # pre-select the previous region (implies confirm)
+freeze_screen        = true    # freeze the screen while selecting
+confirm_region       = false   # adjust the selection before capturing
+remember_last_region = false   # start with the previous selection
 show_cursor          = false   # include the mouse pointer
-pipe_command         = ""      # e.g. 'satty -f - -o "$SHOTSNAP_SCREENSHOT_PATH"'
+pipe_command         = ""      # e.g. 'satty -f -'; the PNG is sent on stdin
 
-[theme]                        # defaults: Noctalia's built-in palette
+[theme]
 primary         = "#fff59b"
 on_primary      = "#0e0e43"
 surface         = "#070722"
@@ -167,14 +123,15 @@ outline         = "#21215f"
 hover           = "#9bfece"
 on_hover        = "#0e0e43"
 dim_opacity     = 0.65
-font            = "sans-serif:bold"   # fontconfig pattern
+font            = "sans-serif:bold"
 ```
 
-`pipe_command` runs via `/bin/sh -lc` with the PNG on stdin. `SHOTSNAP_SCREENSHOT_PATH` holds the
-file path the capture would be saved to, even when `save_to_file` is off.
+`pipe_command` also gets the screenshot's file path in `$SHOTSNAP_SCREENSHOT_PATH`.
 
 ## Building
 
 ```sh
-cargo build --release   # needs wayland, libxkbcommon, EGL (mesa) and fontconfig
+cargo build --release
 ```
+
+Requires wayland, libxkbcommon, mesa (EGL) and fontconfig.
