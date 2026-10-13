@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geom::Rect;
-use crate::paint::Fill;
+use crate::config::Color;
+use crate::paint::{Fill, DEFAULT_SOLIDS};
 
 /// S / M / L multiply the tool's default width, as in Noctalia.
 pub const SIZE_PRESETS: [f64; 3] = [0.5, 1.0, 2.0];
@@ -23,6 +24,15 @@ pub enum Tool {
 /// Noctalia's highlighter opacity.
 pub const HIGHLIGHT_ALPHA: f32 = 0.45;
 
+/// Highlighter colours from the long-press menu, first is the default. Noctalia's swatches.
+pub const HIGHLIGHT_COLORS: [(&str, Color); 5] = [
+    ("Yellow", DEFAULT_SOLIDS[1]),
+    ("Blue", DEFAULT_SOLIDS[3]),
+    ("Red", DEFAULT_SOLIDS[0]),
+    ("Green", DEFAULT_SOLIDS[2]),
+    ("Orange", DEFAULT_SOLIDS[4]),
+];
+
 impl Tool {
     pub const ALL: [Tool; 5] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur];
 
@@ -36,6 +46,16 @@ impl Tool {
             Tool::Highlight => "highlight",
             Tool::Blur => "blur",
         }
+    }
+
+    /// Long-pressing the tool's button opens a menu (arrow ends, highlight colour).
+    pub fn has_menu(self) -> bool {
+        matches!(self, Tool::Arrow | Tool::Highlight)
+    }
+
+    /// Paints with the colour panel's fill. Highlight has its own colour; blur has none.
+    pub fn uses_fill(self) -> bool {
+        !matches!(self, Tool::Highlight | Tool::Blur)
     }
 
     /// Highlights are plain filled boxes and blurs use one fixed strength, so neither has a size

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::annotate::{ArrowHeads, Tool};
+use crate::annotate::{ArrowHeads, Tool, HIGHLIGHT_COLORS};
 use crate::config::{xdg_dir, Color};
 use crate::geom::Rect;
 use crate::paint::{default_gradients, Fill, Gradient, DEFAULT_SOLIDS};
@@ -19,7 +19,7 @@ pub struct State {
     pub annotate: AnnotateState,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnnotateState {
     /// What new shapes are painted with.
@@ -34,6 +34,23 @@ pub struct AnnotateState {
     /// Selected tool, and which ends arrows get heads on.
     pub tool: Tool,
     pub arrow_heads: ArrowHeads,
+    /// The highlighter's own colour, separate from the colour panel.
+    pub highlight_color: Color,
+}
+
+impl Default for AnnotateState {
+    fn default() -> Self {
+        Self {
+            fill: Fill::default(),
+            recent_solids: Vec::new(),
+            recent_gradients: Vec::new(),
+            tool_widths: Default::default(),
+            advanced_size: false,
+            tool: Tool::default(),
+            arrow_heads: ArrowHeads::default(),
+            highlight_color: HIGHLIGHT_COLORS[0].1,
+        }
+    }
 }
 
 impl AnnotateState {
@@ -175,6 +192,13 @@ mod tests {
         let back: State = toml::from_str(&toml::to_string(&State { annotate: a, ..Default::default() }).unwrap()).unwrap();
         assert_eq!(back.annotate.width(Tool::Rectangle), 1.0);
         assert_eq!((back.annotate.tool, back.annotate.arrow_heads), (Tool::Arrow, ArrowHeads::Both));
+
+        // Highlight colour defaults to yellow and round-trips.
+        let mut h = AnnotateState::default();
+        assert_eq!(h.highlight_color, HIGHLIGHT_COLORS[0].1);
+        h.highlight_color = HIGHLIGHT_COLORS[1].1;
+        let back: State = toml::from_str(&toml::to_string(&State { annotate: h, ..Default::default() }).unwrap()).unwrap();
+        assert_eq!(back.annotate.highlight_color, HIGHLIGHT_COLORS[1].1);
 
         // Blur has no size control: it stays at 32 whatever is asked or stored.
         let mut a = AnnotateState::default();

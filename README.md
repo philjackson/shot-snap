@@ -48,7 +48,9 @@ draw on the image:
 - **Rectangle**: drag.
 - **Arrow**: drag from tail to tip. Hold the arrow button to choose where the heads go: at the
   end, at the start, or both. The choice is remembered.
-- **Highlight**: drag a box; it's filled with the current colour or gradient at 45% opacity.
+- **Highlight**: drag a box; it's filled with the highlighter's own colour at 45% opacity. Yellow
+  by default; hold the highlight button to pick yellow, blue, red, green or orange. The choice is
+  remembered.
 - **Blur**: drag a box; what's under it is blurred (fixed strength: Noctalia's sigma of 32 px).
   Blurs always sit under the other annotations, so blurring a region never hides an arrow or label
   you've added.
@@ -79,8 +81,8 @@ stepper is showing are remembered between runs (all in the state file).
 
 #### Colours and gradients
 
-The swatch button next to the rectangle tool opens the colour panel. New rectangles use whatever
-it shows.
+The swatch button after the tools opens the colour panel. Rectangles, arrows and text use whatever
+it shows. Highlight has its own colour and blur needs none, so the button is hidden for those.
 
 - **Solid**: 5 built-in colours, your 10 most recent picks, and a saturation/value square with a
   hue bar for anything else.

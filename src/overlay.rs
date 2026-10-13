@@ -18,7 +18,7 @@ use wayland_client::QueueHandle;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-use crate::annotate::{ArrowHeads, Kind, Shape as Annotation, Tool, SIZE_PRESETS};
+use crate::annotate::{ArrowHeads, Kind, Shape as Annotation, Tool, HIGHLIGHT_COLORS, SIZE_PRESETS};
 use crate::app::App;
 use crate::capture::{NoEvents, OutputMeta};
 use crate::config::{Color, Theme};
@@ -87,6 +87,8 @@ enum Hit {
     Undo,
     Tool(Tool),
     ArrowHeads(ArrowHeads),
+    /// Index into `HIGHLIGHT_COLORS`.
+    HighlightColor(usize),
     Color,
     SizePreset(usize),
     SizeAdvanced,
@@ -185,8 +187,9 @@ pub struct Overlay {
     hover_gen: u64,
     timers: Vec<(Duration, Timer)>,
     /// The arrow button is held: the generation its long-press timer belongs to.
-    long_press: Option<u64>,
-    arrow_menu: bool,
+    long_press: Option<(Tool, u64)>,
+    /// The tool whose long-press menu is open.
+    menu: Option<Tool>,
     /// Index of the text annotation being typed.
     editing: Option<usize>,
     theme: Theme,
@@ -246,7 +249,7 @@ impl Overlay {
             hover_gen: 0,
             timers: Vec::new(),
             long_press: None,
-            arrow_menu: false,
+            menu: None,
             editing: None,
             theme,
             hidden: false,
@@ -280,10 +283,12 @@ impl Overlay {
                     self.tooltip = self.hover_button;
                 }
             }
-            // Still holding the arrow button: open the ends menu.
+            // Still holding the tool's button: open its menu.
             Timer::LongPress(generation) => {
-                if self.long_press == Some(generation) {
-                    self.arrow_menu = true;
+                if let Some((tool, g)) = self.long_press
+                    && g == generation
+                {
+                    self.menu = Some(tool);
                 }
             }
         }
@@ -299,6 +304,10 @@ impl Overlay {
         self.tool = tool;
         if let Some(p) = &mut self.picker {
             p.state_mut().tool = tool;
+            // Its button is hidden for tools that don't use it.
+            if !tool.uses_fill() && p.open {
+                p.close();
+            }
         }
     }
 
@@ -307,11 +316,37 @@ impl Overlay {
             p.state_mut().arrow_heads = heads;
         }
         self.set_tool(Tool::Arrow);
-        self.arrow_menu = false;
+        self.menu = None;
     }
 
+    fn highlight_color(&self) -> Color {
+        self.picker.as_ref().map_or(HIGHLIGHT_COLORS[0].1, |p| p.state().highlight_color)
+    }
+
+    fn set_highlight_color(&mut self, i: usize) {
+        if let Some(p) = &mut self.picker {
+            p.state_mut().highlight_color = HIGHLIGHT_COLORS[i].1;
+        }
+        self.set_tool(Tool::Highlight);
+        self.menu = None;
+    }
+
+    /// Picks a menu item. Returns false if `hit` isn't one.
+    fn choose_menu_item(&mut self, hit: Option<Hit>) -> bool {
+        match hit {
+            Some(Hit::ArrowHeads(heads)) => self.set_arrow_heads(heads),
+            Some(Hit::HighlightColor(i)) => self.set_highlight_color(i),
+            _ => return false,
+        }
+        true
+    }
+
+    /// What the current tool paints with: the highlighter has its own colour.
     fn current_fill(&self) -> crate::paint::Fill {
-        self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default()
+        match self.tool {
+            Tool::Highlight => crate::paint::Fill::Solid(self.highlight_color()),
+            _ => self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default(),
+        }
     }
 
     fn image_scale(&self) -> f64 {
@@ -567,7 +602,10 @@ impl Overlay {
         if self.drag == Drag::None {
             let s = &self.surfs[i];
             // Leaving the arrow button before the long press fires cancels it.
-            if self.long_press.is_some() && !self.arrow_menu && !s.buttons.iter().any(|(r, h)| *h == Hit::Tool(Tool::Arrow) && r.contains(pos)) {
+            if let Some((tool, _)) = self.long_press
+                && self.menu.is_none()
+                && !s.buttons.iter().any(|(r, h)| *h == Hit::Tool(tool) && r.contains(pos))
+            {
                 self.long_press = None;
             }
             let hover = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
@@ -609,27 +647,22 @@ impl Overlay {
             }
             (Mode::Picker, false) => None,
             (Mode::Annotate, true) if self.press_picker(p) => None,
-            (Mode::Annotate, true) if self.arrow_menu => {
-                // The ends menu is open: pick from it, or any other click just closes it.
-                match self.hover_button {
-                    Some(Hit::ArrowHeads(heads)) => self.set_arrow_heads(heads),
-                    _ => self.arrow_menu = false,
+            (Mode::Annotate, true) if self.menu.is_some() => {
+                // A tool menu is open: pick from it, or any other click just closes it.
+                if !self.choose_menu_item(self.hover_button) {
+                    self.menu = None;
                 }
                 None
             }
             (Mode::Annotate, true) => match self.hover_button {
-                Some(Hit::Tool(Tool::Arrow)) => {
+                Some(Hit::Tool(tool)) if tool.has_menu() => {
                     // Decided on release: a short click picks the tool, a long press opens the menu.
-                    self.long_press = Some(self.hover_gen);
+                    self.long_press = Some((tool, self.hover_gen));
                     self.timers.push((LONG_PRESS, Timer::LongPress(self.hover_gen)));
                     None
                 }
                 Some(Hit::Tool(tool)) => {
                     self.set_tool(tool);
-                    None
-                }
-                Some(Hit::ArrowHeads(heads)) => {
-                    self.set_arrow_heads(heads);
                     None
                 }
                 Some(Hit::Color) => {
@@ -689,13 +722,14 @@ impl Overlay {
                 if let Some(picker) = self.picker.as_mut().filter(|p| p.dragging()) {
                     picker.release();
                 }
-                if self.long_press.take().is_some() {
+                if let Some((tool, _)) = self.long_press.take() {
                     match self.hover_button {
                         // Released on the button before the menu opened: a plain click.
-                        Some(Hit::Tool(Tool::Arrow)) if !self.arrow_menu => self.set_tool(Tool::Arrow),
+                        Some(Hit::Tool(t)) if t == tool && self.menu.is_none() => self.set_tool(tool),
                         // Press, slide onto an item, release.
-                        Some(Hit::ArrowHeads(heads)) => self.set_arrow_heads(heads),
-                        _ => {}
+                        hit => {
+                            self.choose_menu_item(hit);
+                        }
                     }
                 }
                 if let (Drag::Draw { anchor }, Some(ip)) = (std::mem::replace(&mut self.drag, Drag::None), self.to_image(p)) {
@@ -797,8 +831,8 @@ impl Overlay {
             self.redraw_all(qh);
             return None;
         }
-        if keysym == Keysym::Escape && self.arrow_menu {
-            self.arrow_menu = false;
+        if keysym == Keysym::Escape && self.menu.is_some() {
+            self.menu = None;
             self.redraw_all(qh);
             return None;
         }
@@ -956,7 +990,8 @@ impl Overlay {
             width: tool_width,
             advanced: self.advanced_size(),
             arrow_heads: self.arrow_heads(),
-            arrow_menu: self.arrow_menu,
+            menu: self.menu,
+            highlight_color: self.highlight_color(),
         };
         let tooltip = self.tooltip.and_then(tooltip_text);
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
@@ -1075,9 +1110,10 @@ impl Overlay {
                     picker.draw(canvas, font, t, anchor, (bar.bottom() as f32) + SPACE_SM, w);
                 }
                 s.menu = None;
-                let arrow = s.buttons.iter().find(|(_, hit)| *hit == Hit::Tool(Tool::Arrow)).map(|(r, _)| *r);
-                if let (true, Some(arrow), Some(bar)) = (self.arrow_menu, arrow, s.toolbar) {
-                    let (items, menu) = draw_arrow_menu(canvas, font, t, arrow, bar.bottom() as f32 + SPACE_SM, w, &toolbar_state);
+                let menu_tool = self.menu;
+                let anchor = menu_tool.and_then(|tool| s.buttons.iter().find(|(_, hit)| *hit == Hit::Tool(tool))).map(|(r, _)| *r);
+                if let (Some(tool), Some(anchor), Some(bar)) = (menu_tool, anchor, s.toolbar) {
+                    let (items, menu) = draw_tool_menu(canvas, font, t, tool, anchor, bar.bottom() as f32 + SPACE_SM, w, &toolbar_state);
                     s.buttons.extend(items);
                     s.menu = Some(menu);
                 }
@@ -1206,7 +1242,8 @@ struct ToolbarState {
     width: f64,
     advanced: bool,
     arrow_heads: ArrowHeads,
-    arrow_menu: bool,
+    menu: Option<Tool>,
+    highlight_color: Color,
 }
 
 const PRESET_W: f32 = 26.0;
@@ -1220,7 +1257,7 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Tool(Tool::Rectangle) => "Rectangle (s)",
         Hit::Tool(Tool::Arrow) => "Arrow (a) · hold to choose the ends",
         Hit::Tool(Tool::Text) => "Text (t) · click to type, Enter to finish",
-        Hit::Tool(Tool::Highlight) => "Highlight (h)",
+        Hit::Tool(Tool::Highlight) => "Highlight (h) · hold to choose the colour",
         Hit::Tool(Tool::Blur) => "Blur (u)",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
@@ -1233,7 +1270,7 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Save => "Save the annotated image (Ctrl+S)",
         Hit::Done => "Apply the screenshot settings (Enter)",
         Hit::Close => "Close without delivering (Esc)",
-        Hit::Output(_) | Hit::ArrowHeads(_) => return None,
+        Hit::Output(_) | Hit::ArrowHeads(_) | Hit::HighlightColor(_) => return None,
     })
 }
 
@@ -1248,8 +1285,11 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
         Button(Hit::Tool(Tool::Text)),
         Button(Hit::Tool(Tool::Highlight)),
         Button(Hit::Tool(Tool::Blur)),
-        Button(Hit::Color),
     ];
+    // The colour panel only matters for tools that paint with it.
+    if st.tool.uses_fill() {
+        items.push(Button(Hit::Color));
+    }
     if st.tool.has_size() {
         items.extend([Separator, Presets, Button(Hit::SizeAdvanced)]);
         if st.advanced {
@@ -1316,7 +1356,7 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
                 // The selected tool and Done (the primary action) are filled.
                 let (fill, fg) = match (hit, st.hover == Some(hit) && enabled) {
                     (Hit::Tool(tool), _) if tool == st.tool => (Some(t.primary), t.on_primary),
-                    (Hit::Tool(Tool::Arrow), false) if st.arrow_menu => (Some(t.surface_variant), t.on_surface),
+                    (Hit::Tool(tool), false) if st.menu == Some(tool) => (Some(t.surface_variant), t.on_surface),
                     (_, true) => (Some(t.hover), t.on_hover),
                     (Hit::Color, false) if st.picker_open => (Some(t.surface_variant), t.on_surface),
                     (Hit::SizeAdvanced, false) if st.advanced => (Some(t.surface_variant), t.on_surface),
@@ -1334,8 +1374,13 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
                     // The button shows the current paint.
                     let r = to_rect((x + pad, y + pad, ICON, ICON));
                     crate::picker::swatch(canvas, r, current, false, t, matches!(current, Fill::Solid(_)));
-                } else if hit == Hit::Tool(Tool::Arrow) {
-                    draw_arrow_icon(canvas, st.arrow_heads, x + pad, y + pad, fg);
+                } else if let Hit::Tool(tool) = hit
+                    && tool.has_menu()
+                {
+                    match tool {
+                        Tool::Arrow => draw_arrow_icon(canvas, st.arrow_heads, x + pad, y + pad, fg),
+                        _ => draw_highlight_icon(canvas, st.highlight_color, x + pad, y + pad, fg),
+                    }
                     // Corner mark: this button has a menu (long press).
                     let mut mark = Path::new();
                     mark.move_to(x + CONTROL_SM - 4.0, y + CONTROL_SM - 9.0);
@@ -1356,17 +1401,23 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
 
 const MENU_W: f32 = 200.0;
 
-/// The arrow-ends menu under the arrow button. Returns its items and its card.
-fn draw_arrow_menu(canvas: &mut Canvas<OpenGl>, font: Option<femtovg::FontId>, t: &Theme, anchor: Rect, top: f32, w: f32, st: &ToolbarState) -> (Vec<(Rect, Hit)>, Rect) {
+/// A tool's long-press menu under its button: arrow ends or highlight colours. Returns its items
+/// and its card.
+#[allow(clippy::too_many_arguments)]
+fn draw_tool_menu(canvas: &mut Canvas<OpenGl>, font: Option<femtovg::FontId>, t: &Theme, tool: Tool, anchor: Rect, top: f32, w: f32, st: &ToolbarState) -> (Vec<(Rect, Hit)>, Rect) {
+    let entries: Vec<(Hit, &str, bool)> = match tool {
+        Tool::Highlight => HIGHLIGHT_COLORS.iter().enumerate().map(|(i, (name, c))| (Hit::HighlightColor(i), *name, *c == st.highlight_color)).collect(),
+        _ => ArrowHeads::ALL.iter().map(|h| (Hit::ArrowHeads(*h), h.label(), *h == st.arrow_heads)).collect(),
+    };
     let pad = SPACE_SM / 2.0;
-    let (cw, ch) = (MENU_W, CONTROL_SM * 3.0 + pad * 2.0);
+    let cw = if tool == Tool::Highlight { MENU_W * 0.7 } else { MENU_W };
+    let ch = CONTROL_SM * entries.len() as f32 + pad * 2.0;
     let x0 = (anchor.x as f32).clamp(4.0, (w - cw - 4.0).max(4.0)).round();
     card(canvas, (x0, top, cw, ch), RADIUS_MD + 2.0, t.surface.with_alpha(0.96), t.outline);
     let mut items = Vec::new();
-    for (i, heads) in ArrowHeads::ALL.into_iter().enumerate() {
+    for (i, (hit, label, selected)) in entries.into_iter().enumerate() {
         let r = (x0 + pad, top + pad + CONTROL_SM * i as f32, cw - pad * 2.0, CONTROL_SM);
-        let hit = Hit::ArrowHeads(heads);
-        let (fill, fg) = match (heads == st.arrow_heads, st.hover == Some(hit)) {
+        let (fill, fg) = match (selected, st.hover == Some(hit)) {
             (_, true) => (Some(t.hover), t.on_hover),
             (true, false) => (Some(t.primary), t.on_primary),
             _ => (None, t.on_surface),
@@ -1377,13 +1428,25 @@ fn draw_arrow_menu(canvas: &mut Canvas<OpenGl>, font: Option<femtovg::FontId>, t
             canvas.fill_path(&path, &Paint::color(fill.fv()));
         }
         let ipad = (CONTROL_SM - ICON) / 2.0;
-        draw_arrow_icon(canvas, heads, r.0 + ipad, r.1 + ipad, fg);
+        match hit {
+            Hit::ArrowHeads(heads) => draw_arrow_icon(canvas, heads, r.0 + ipad, r.1 + ipad, fg),
+            Hit::HighlightColor(i) => draw_highlight_icon(canvas, HIGHLIGHT_COLORS[i].1, r.0 + ipad, r.1 + ipad, fg),
+            _ => {}
+        }
         if let Some(font) = font {
-            let _ = canvas.fill_text(r.0 + CONTROL_SM + 2.0, r.1 + CONTROL_SM / 2.0, heads.label(), &text_paint(font, CAPTION_FONT, fg));
+            let _ = canvas.fill_text(r.0 + CONTROL_SM + 2.0, r.1 + CONTROL_SM / 2.0, label, &text_paint(font, CAPTION_FONT, fg));
         }
         items.push((to_rect(r), hit));
     }
     (items, to_rect((x0, top, cw, ch)))
+}
+
+/// A marked box in the highlighter's colour.
+fn draw_highlight_icon(canvas: &mut Canvas<OpenGl>, color: Color, x: f32, y: f32, outline: Color) {
+    let mut path = Path::new();
+    path.rounded_rect(x + 1.5, y + 4.0, 13.0, 8.0, 1.5);
+    canvas.fill_path(&path, &Paint::color(color.with_alpha(0.85).fv()));
+    canvas.stroke_path(&path, &Paint::color(outline.fv()).with_line_width(1.5));
 }
 
 /// A diagonal arrow with heads where `heads` says.
@@ -1421,13 +1484,6 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
     let mut path = Path::new();
     match hit {
         Hit::Tool(Tool::Rectangle) => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
-        Hit::Tool(Tool::Highlight) => {
-            // A translucent marked box.
-            let mut fill = Path::new();
-            fill.rounded_rect(x + 1.5, y + 4.0, 13.0, 8.0, 1.5);
-            canvas.fill_path(&fill, &Paint::color(color.with_alpha(0.45).fv()));
-            path.rounded_rect(x + 1.5, y + 4.0, 13.0, 8.0, 1.5);
-        }
         Hit::Tool(Tool::Blur) => {
             // Tabler blur: a circle fading into lines.
             path.circle(x + 8.0, y + 8.0, 6.0);
@@ -1506,7 +1562,7 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
             path.move_to(x + 8.0, y + 4.0);
             path.line_to(x + 8.0, y + 12.0);
         }
-        Hit::Output(_) | Hit::Color | Hit::SizePreset(_) | Hit::Tool(Tool::Arrow) | Hit::ArrowHeads(_) => return,
+        Hit::Output(_) | Hit::Color | Hit::SizePreset(_) | Hit::Tool(Tool::Arrow | Tool::Highlight) | Hit::ArrowHeads(_) | Hit::HighlightColor(_) => return,
     }
     let paint = Paint::color(color.fv())
         .with_line_width(1.75)
