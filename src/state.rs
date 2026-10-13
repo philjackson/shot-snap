@@ -9,6 +9,7 @@ use crate::annotate::{ArrowHeads, Tool, HIGHLIGHT_COLORS};
 use crate::config::{xdg_dir, Color};
 use crate::geom::Rect;
 use crate::paint::{default_gradients, Fill, Gradient, DEFAULT_SOLIDS};
+use crate::style::Style;
 
 pub const RECENT_LIMIT: usize = 10;
 
@@ -36,6 +37,8 @@ pub struct AnnotateState {
     pub arrow_heads: ArrowHeads,
     /// The highlighter's own colour, separate from the colour panel.
     pub highlight_color: Color,
+    /// Screenshot style (padded backdrop, rounded corners, shadow).
+    pub style: Style,
 }
 
 impl Default for AnnotateState {
@@ -49,6 +52,7 @@ impl Default for AnnotateState {
             tool: Tool::default(),
             arrow_heads: ArrowHeads::default(),
             highlight_color: HIGHLIGHT_COLORS[0].1,
+            style: Style::default(),
         }
     }
 }

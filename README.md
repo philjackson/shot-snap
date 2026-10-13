@@ -74,12 +74,21 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
 
+#### Screenshot style
+
+The sparkles button (✦) opens the style panel, after Noctalia's. **Style screenshot** puts the
+capture on a padded backdrop with rounded corners and a soft drop shadow, previewed live around the
+image. The backdrop uses the colour panel's current colour or gradient (including the gradient's
+angle). **Background** turns the backdrop off for a transparent frame. Padding, corner radius and
+shadow blur / opacity / X and Y offset are sliders (in image pixels; defaults 64, 12, 40, 50%, 0,
+16). Copy, Save and Done deliver the styled image. Settings are remembered in the state file.
+
 #### Toolbar
 
 Undo · Rectangle, arrow, text, highlight, blur, numbering, colour · S / M / L sizes (½×, 1×, 2× the
 tool's default: 6px strokes, 24px text, 32px markers; hidden for highlight and blur) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
-tooltip. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
+tooltip. The style button (✦) sits just before Copy. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
 stepper is showing are remembered between runs (all in the state file).
 
 #### Colours and gradients

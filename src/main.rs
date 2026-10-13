@@ -14,6 +14,8 @@ mod paint;
 mod picker;
 mod render;
 mod state;
+mod style;
+mod style_panel;
 mod ui;
 
 use std::process::ExitCode;
