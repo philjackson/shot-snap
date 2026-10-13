@@ -16,23 +16,41 @@ pub enum Tool {
     Rectangle,
     Arrow,
     Text,
+    Highlight,
+    Blur,
 }
 
+/// Noctalia's highlighter opacity.
+pub const HIGHLIGHT_ALPHA: f32 = 0.45;
+
 impl Tool {
+    pub const ALL: [Tool; 5] = [Tool::Rectangle, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur];
+
+
     /// Key in the state file.
     pub fn name(self) -> &'static str {
         match self {
             Tool::Rectangle => "rectangle",
             Tool::Arrow => "arrow",
             Tool::Text => "text",
+            Tool::Highlight => "highlight",
+            Tool::Blur => "blur",
         }
     }
 
-    /// Stroke width in logical pixels; for text, the font size.
+    /// Highlights are plain filled boxes and blurs use one fixed strength, so neither has a size
+    /// control.
+    pub fn has_size(self) -> bool {
+        !matches!(self, Tool::Highlight | Tool::Blur)
+    }
+
+    /// Stroke width in logical pixels; for text the font size, for blur the fixed strength (sigma,
+    /// Noctalia's default).
     pub fn default_width(self) -> f64 {
         match self {
             Tool::Rectangle | Tool::Arrow => 6.0,
-            Tool::Text => 24.0,
+            Tool::Text | Tool::Highlight => 24.0,
+            Tool::Blur => 32.0,
         }
     }
 
@@ -75,12 +93,16 @@ pub enum Kind {
     Arrow { from: Point, to: Point, heads: ArrowHeads },
     /// `at` is the top-left of the text.
     Text { at: Point, text: String },
+    /// A box filled with the paint at `HIGHLIGHT_ALPHA`.
+    Highlight(Rect),
+    /// A box showing the image blurred; `Shape::width` is the blur sigma.
+    Blur(Rect),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     pub kind: Kind,
-    /// Stroke width, or font size for text, in image pixels.
+    /// Stroke width, font size for text, or blur sigma, in image pixels.
     pub width: f64,
     pub fill: Fill,
 }
@@ -123,7 +145,8 @@ impl Shape {
                 }
                 Some(Rect { x: x0 - h, y: y0 - h, w: x1 - x0 + self.width, h: y1 - y0 + self.width })
             }
-            Kind::Text { .. } => None,
+            Kind::Highlight(r) => Some(*r),
+            Kind::Text { .. } | Kind::Blur(_) => None,
         }
     }
 }

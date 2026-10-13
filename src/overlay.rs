@@ -149,6 +149,7 @@ struct Surf {
     toolbar: Option<Rect>,
     /// The arrow-ends menu, when open.
     menu: Option<Rect>,
+    blurs: render::BlurCache,
 }
 
 /// The image being annotated. Annotations are kept in image pixels.
@@ -221,7 +222,7 @@ impl Overlay {
                 layer.set_exclusive_zone(-1);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
                 layer.commit();
-                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new(), toolbar: None, menu: None }
+                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new(), toolbar: None, menu: None, blurs: Default::default() }
             })
             .collect();
         let preselect = preselect.and_then(|r| r.intersect(&desktop)).filter(|r| r.w >= MIN_SELECTION && r.h >= MIN_SELECTION);
@@ -742,6 +743,10 @@ impl Overlay {
                 (rect.w >= min && rect.h >= min).then_some(Kind::Rectangle(rect))
             }
             Tool::Arrow => ((b.0 - a.0).hypot(b.1 - a.1) >= min).then_some(Kind::Arrow { from: a, to: b, heads: self.arrow_heads() }),
+            Tool::Highlight | Tool::Blur => {
+                let rect = Rect::from_points(a, b);
+                (rect.w >= min && rect.h >= min).then_some(if self.tool == Tool::Blur { Kind::Blur(rect) } else { Kind::Highlight(rect) })
+            }
             Tool::Text => None,
         }
     }
@@ -832,10 +837,12 @@ impl Overlay {
                     self.redraw_all(qh);
                     None
                 }
-                Keysym::s | Keysym::a | Keysym::t if !mods.ctrl && !mods.alt && !mods.logo => {
+                Keysym::s | Keysym::a | Keysym::t | Keysym::h | Keysym::u if !mods.ctrl && !mods.alt && !mods.logo => {
                     self.set_tool(match keysym {
                         Keysym::s => Tool::Rectangle,
                         Keysym::a => Tool::Arrow,
+                        Keysym::h => Tool::Highlight,
+                        Keysym::u => Tool::Blur,
                         _ => Tool::Text,
                     });
                     self.redraw_all(qh);
@@ -895,7 +902,7 @@ impl Overlay {
             return Outcome::Failed(format!("{e:#}"));
         }
         let font = gl.font;
-        match render::export(&mut gl.canvas, font, texture, &editor.image, &self.annotations, scale) {
+        match render::export(&mut gl.canvas, font, texture, &editor.image, &self.annotations, scale, &mut s.blurs) {
             Ok(image) => Outcome::Annotated(image, action),
             Err(e) => Outcome::Failed(format!("rendering the annotated image: {e:#}")),
         }
@@ -954,12 +961,26 @@ impl Overlay {
         let tooltip = self.tooltip.and_then(tooltip_text);
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
 
+        let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
+        let shapes: Vec<Annotation> = match &self.editor {
+            Some(e) => {
+                let mut shapes = self.annotations.clone();
+                shapes.extend(drawing.map(|kind| Annotation { kind, width: tool_width * e.scale, fill: fill.clone() }));
+                shapes
+            }
+            None => Vec::new(),
+        };
+        let image_size = self.editor.as_ref().map(|e| (e.image.width, e.image.height));
+
         let s = &mut self.surfs[i];
         let Some(gl) = s.gl.as_mut() else { return Ok(()) };
         gl.make_current()?;
         let (w, h) = (s.size.0 as f32, s.size.1 as f32);
         let font = gl.font;
         let canvas = &mut gl.canvas;
+        if let (Some(size), Some(tex)) = (image_size, s.texture) {
+            render::prepare_blurs(canvas, &mut s.blurs, tex, size, &shapes);
+        }
         canvas.reset();
         canvas.clear_rect(0, 0, s.phys.0, s.phys.1, femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0));
         if self.hidden {
@@ -1040,17 +1061,14 @@ impl Overlay {
                     // Annotations are clipped to the image, as they are in the export.
                     canvas.save();
                     canvas.scissor(cx, cy, cw, ch);
-                    let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
-                    let mut shapes = self.annotations.clone();
-                    shapes.extend(drawing.map(|kind| Annotation { kind, width: tool_width * e.scale, fill }));
-                    render::draw_shapes(canvas, font, &shapes, Map { ox: c.x, oy: c.y, fit: e.fit }, e.scale, self.editing);
+                    let backdrop = render::Backdrop { size: (e.image.width, e.image.height), blurs: &s.blurs };
+                    render::draw_shapes(canvas, font, &shapes, Map { ox: c.x, oy: c.y, fit: e.fit }, e.scale, self.editing, &backdrop);
                     canvas.restore();
                     // Inset outline separating the image from the surround; never exported.
                     let mut path = Path::new();
                     path.rect(cx + 0.5, cy + 0.5, cw - 1.0, ch - 1.0);
                     canvas.stroke_path(&path, &Paint::color(t.outline.fv()).with_line_width(1.0));
                 }
-                let fill = self.picker.as_ref().map(|p| p.fill().clone()).unwrap_or_default();
                 (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, font, w, &fill, &toolbar_state);
                 let anchor = s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).map(|(r, _)| *r);
                 if let (Some(picker), Some(anchor), Some(bar)) = (self.picker.as_mut().filter(|p| p.open), anchor, s.toolbar) {
@@ -1202,6 +1220,8 @@ fn tooltip_text(hit: Hit) -> Option<&'static str> {
         Hit::Tool(Tool::Rectangle) => "Rectangle (s)",
         Hit::Tool(Tool::Arrow) => "Arrow (a) · hold to choose the ends",
         Hit::Tool(Tool::Text) => "Text (t) · click to type, Enter to finish",
+        Hit::Tool(Tool::Highlight) => "Highlight (h)",
+        Hit::Tool(Tool::Blur) => "Blur (u)",
         Hit::Color => "Colour or gradient",
         Hit::SizePreset(0) => "Small",
         Hit::SizePreset(1) => "Medium",
@@ -1226,13 +1246,15 @@ fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, font: Option<fe
         Button(Hit::Tool(Tool::Rectangle)),
         Button(Hit::Tool(Tool::Arrow)),
         Button(Hit::Tool(Tool::Text)),
+        Button(Hit::Tool(Tool::Highlight)),
+        Button(Hit::Tool(Tool::Blur)),
         Button(Hit::Color),
-        Separator,
-        Presets,
-        Button(Hit::SizeAdvanced),
     ];
-    if st.advanced {
-        items.extend([Button(Hit::SizeDown), SizeLabel, Button(Hit::SizeUp)]);
+    if st.tool.has_size() {
+        items.extend([Separator, Presets, Button(Hit::SizeAdvanced)]);
+        if st.advanced {
+            items.extend([Button(Hit::SizeDown), SizeLabel, Button(Hit::SizeUp)]);
+        }
     }
     items.extend([Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)]);
     let item_w = |item: &Item| match item {
@@ -1399,6 +1421,21 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
     let mut path = Path::new();
     match hit {
         Hit::Tool(Tool::Rectangle) => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
+        Hit::Tool(Tool::Highlight) => {
+            // A translucent marked box.
+            let mut fill = Path::new();
+            fill.rounded_rect(x + 1.5, y + 4.0, 13.0, 8.0, 1.5);
+            canvas.fill_path(&fill, &Paint::color(color.with_alpha(0.45).fv()));
+            path.rounded_rect(x + 1.5, y + 4.0, 13.0, 8.0, 1.5);
+        }
+        Hit::Tool(Tool::Blur) => {
+            // Tabler blur: a circle fading into lines.
+            path.circle(x + 8.0, y + 8.0, 6.0);
+            for ly in [5.0, 8.0, 11.0] {
+                path.move_to(x + 8.0, y + ly);
+                path.line_to(x + 13.5 - (ly - 8.0f32).abs() * 0.4, y + ly);
+            }
+        }
         Hit::Tool(Tool::Text) => {
             // Tabler typography-ish: a T.
             path.move_to(x + 3.0, y + 4.0);

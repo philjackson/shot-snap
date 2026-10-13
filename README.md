@@ -48,6 +48,10 @@ draw on the image:
 - **Rectangle**: drag.
 - **Arrow**: drag from tail to tip. Hold the arrow button to choose where the heads go: at the
   end, at the start, or both. The choice is remembered.
+- **Highlight**: drag a box; it's filled with the current colour or gradient at 45% opacity.
+- **Blur**: drag a box; what's under it is blurred (fixed strength: Noctalia's sigma of 32 px).
+  Blurs always sit under the other annotations, so blurring a region never hides an arrow or label
+  you've added.
 - **Text**: click to place a caret and type. Backspace deletes; Enter finishes; Esc throws away
   the text you're typing. Size and colour changes apply to the text under the caret.
 
@@ -61,14 +65,14 @@ The export uses the same renderer as the editor, so it matches what you see exac
 | Ctrl+C | Copy to clipboard |
 | Ctrl+S | Save to file |
 | Ctrl+Z / ↶ | Undo the last annotation |
-| `s` / `a` / `t` | Rectangle / arrow / text tool |
+| `s` / `a` / `t` / `h` / `u` | Rectangle / arrow / text / highlight / blur tool |
 | `[` / `]` | Thinner / thicker by 1px |
 | Delete | Remove the selected gradient stop (colour panel open) |
 
 #### Toolbar
 
-Undo · Rectangle, arrow, text, colour · S / M / L sizes (½×, 1×, 2× the tool's default: 6px
-strokes, 24px text) · fine size
+Undo · Rectangle, arrow, text, highlight, blur, colour · S / M / L sizes (½×, 1×, 2× the tool's
+default: 6px strokes, 24px text; hidden for highlight and blur) · fine size
 adjustment (reveals − px +) · Copy, Save, Done · Close. Rest the pointer on a button for its
 tooltip. Each tool remembers its own width. The selected tool, the arrow ends and whether the fine
 stepper is showing are remembered between runs (all in the state file).

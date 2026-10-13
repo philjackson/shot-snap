@@ -37,11 +37,18 @@ pub struct AnnotateState {
 }
 
 impl AnnotateState {
+    /// Tools without a size control always use their default.
     pub fn width(&self, tool: Tool) -> f64 {
-        self.tool_widths.get(tool.name()).copied().unwrap_or(tool.default_width())
+        match tool.has_size() {
+            true => self.tool_widths.get(tool.name()).copied().unwrap_or(tool.default_width()),
+            false => tool.default_width(),
+        }
     }
 
     pub fn set_width(&mut self, tool: Tool, width: f64) {
+        if !tool.has_size() {
+            return;
+        }
         let (min, max) = tool.width_range();
         self.tool_widths.insert(tool.name().into(), width.clamp(min, max));
     }
@@ -76,6 +83,8 @@ pub fn load() -> State {
     let mut state: State = std::fs::read_to_string(path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
     let a = &mut state.annotate;
     a.recent_solids.truncate(RECENT_LIMIT);
+    // Widths for tools without a size control (e.g. from older versions) mean nothing.
+    a.tool_widths.retain(|name, _| Tool::ALL.iter().any(|t| t.has_size() && t.name() == name));
     a.recent_gradients.retain(|g| g.stops.len() >= 2);
     a.recent_gradients.truncate(RECENT_LIMIT);
     if matches!(&a.fill, Fill::Gradient(g) if g.stops.len() < 2) {
@@ -166,5 +175,11 @@ mod tests {
         let back: State = toml::from_str(&toml::to_string(&State { annotate: a, ..Default::default() }).unwrap()).unwrap();
         assert_eq!(back.annotate.width(Tool::Rectangle), 1.0);
         assert_eq!((back.annotate.tool, back.annotate.arrow_heads), (Tool::Arrow, ArrowHeads::Both));
+
+        // Blur has no size control: it stays at 32 whatever is asked or stored.
+        let mut a = AnnotateState::default();
+        a.set_width(Tool::Blur, 10.0);
+        a.tool_widths.insert("blur".into(), 80.0);
+        assert_eq!(a.width(Tool::Blur), 32.0);
     }
 }
