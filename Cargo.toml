@@ -1,0 +1,27 @@
+[package]
+name = "shot-snap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+femtovg = { version = "0.27", default-features = false, features = ["textlayout"] }
+glutin = { version = "0.32", default-features = false, features = ["egl", "wayland"] }
+raw-window-handle = "0.6"
+png = "0.18"
+serde_json = "1"
+libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "alloc"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+anyhow = "1"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
