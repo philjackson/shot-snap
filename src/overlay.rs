@@ -71,6 +71,8 @@ pub enum Outcome {
     Picked(u32),
     /// The editor's image with the annotations rendered in.
     Annotated(Image, Action),
+    /// A window picked in the window picker, clipped to the desktop as `rect`.
+    Window(Window),
     Failed(String),
     Cancel,
 }
@@ -741,9 +743,8 @@ impl Overlay {
             }
             (Mode::Picker, false) => None,
             (Mode::WindowPicker, true) => {
-                // Only the part on screen can be captured.
-                let rect = self.hover_window.and_then(|i| self.windows[i].rect.intersect(&self.desktop))?;
-                return Some(Outcome::Region(rect.rounded(), Action::Default));
+                let window = self.hover_window.map(|i| self.windows[i].clone())?;
+                return Some(Outcome::Window(window));
             }
             (Mode::WindowPicker, false) => None,
             (Mode::Annotate, true) if self.press_picker(p) => None,

@@ -14,6 +14,10 @@ use crate::geom::Rect;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
     pub title: String,
+    /// Wayland app id (Hyprland's class), to match the window's toplevel.
+    pub app_id: String,
+    /// Hyprland's window address, which identifies its toplevel exactly.
+    pub address: Option<u64>,
     /// Global logical coordinates.
     pub rect: Rect,
     pub focused: bool,
@@ -69,6 +73,8 @@ fn hyprland(clients: &Value, monitors: &Value, active: &Value) -> Vec<Window> {
             let (w, h) = pair(&c["size"])?;
             let window = Window {
                 title: c["title"].as_str().unwrap_or_default().to_owned(),
+                app_id: c["class"].as_str().unwrap_or_default().to_owned(),
+                address: c["address"].as_str().and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()),
                 rect: Rect { x, y, w, h },
                 focused: active_address.is_some() && c["address"].as_str() == active_address,
             };
@@ -88,7 +94,9 @@ fn sway(tree: &Value) -> Vec<Window> {
             let r = &node["rect"];
             if let (Some(x), Some(y), Some(w), Some(h)) = (r["x"].as_f64(), r["y"].as_f64(), r["width"].as_f64(), r["height"].as_f64()) {
                 let title = node["name"].as_str().unwrap_or_default().to_owned();
-                out.push((floating, Window { title, rect: Rect { x, y, w, h }, focused: node["focused"].as_bool() == Some(true) }));
+                // Xwayland windows have no app id; their toplevel reports the X class.
+                let app_id = node["app_id"].as_str().or(node["window_properties"]["class"].as_str()).unwrap_or_default().to_owned();
+                out.push((floating, Window { title, app_id, address: None, rect: Rect { x, y, w, h }, focused: node["focused"].as_bool() == Some(true) }));
             }
         }
         for child in node["nodes"].as_array().into_iter().flatten() {
@@ -127,6 +135,8 @@ fn niri(windows: &Value, workspaces: &Value, outputs: &HashMap<String, (f64, f64
             let (ww, wh) = pair(&layout["window_size"]).or_else(|| pair(&layout["tile_size"]))?;
             let window = Window {
                 title: w["title"].as_str().unwrap_or_default().to_owned(),
+                app_id: w["app_id"].as_str().unwrap_or_default().to_owned(),
+                address: None,
                 rect: Rect { x: origin.0 + tx + ox, y: origin.1 + ty + oy, w: ww, h: wh },
                 focused: w["is_focused"].as_bool() == Some(true),
             };
@@ -160,6 +170,7 @@ mod tests {
         let titles: Vec<_> = ws.iter().map(|w| w.title.as_str()).collect();
         assert_eq!(titles, ["float", "tiled"]);
         assert!(ws[1].focused && !ws[0].focused);
+        assert_eq!(ws[1].address, Some(0xa));
         assert_eq!(at(&ws, (150.0, 150.0)), Some(0), "the floating window is on top");
         assert_eq!(at(&ws, (700.0, 500.0)), Some(1));
         assert_eq!(at(&ws, (900.0, 900.0)), None);

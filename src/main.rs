@@ -7,6 +7,7 @@ mod deliver;
 mod focused;
 mod geom;
 mod gl;
+mod hyprland_proto;
 mod image;
 mod ipc;
 mod overlay;
@@ -17,6 +18,7 @@ mod state;
 mod style;
 mod style_panel;
 mod windows;
+mod toplevel;
 mod ui;
 
 use std::process::ExitCode;

@@ -37,6 +37,8 @@ use crate::gl::Gl;
 use crate::image::{compose, Image, OutputFrame};
 use crate::ipc::{FullscreenTarget, Request, Response};
 use crate::overlay::{self, Outcome, Overlay};
+use crate::toplevel::{Toplevels, WindowCapture};
+use crate::windows::Window;
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const HIDE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -59,7 +61,15 @@ enum Stage {
     Final(Area, Action),
     /// The annotation editor is open on the captured image.
     Editing,
+    /// Capturing one window's own contents.
+    WindowCapture(Action),
     Delivering,
+}
+
+struct WindowFallback {
+    on_screen: Rect,
+    whole: Rect,
+    frozen: Vec<OutputFrame>,
 }
 
 struct Job {
@@ -97,7 +107,12 @@ pub struct App {
     batch_counter: u64,
     overlay: Option<Overlay>,
     /// Windows found for a window-pick request, handed to its overlay when it opens.
-    pending_windows: Vec<crate::windows::Window>,
+    pending_windows: Vec<Window>,
+    pub toplevels: Toplevels,
+    pub window_capture: Option<WindowCapture>,
+    /// What a window capture falls back to: the window's screen area (from frozen frames if
+    /// there are any), and the whole window's rect for sizing the editor.
+    window_fallback: Option<WindowFallback>,
     delivered: Sender<anyhow::Result<Delivered>>,
     exit: bool,
 }
@@ -154,6 +169,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
         viewporter: globals.bind(&qh, 1..=1, NoEvents).context("compositor has no wp_viewporter")?,
         cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
         clipboard: Clipboard::bind(&globals, &qh),
+        toplevels: Toplevels::bind(&globals, &qh),
         gl: Gl::new(&conn, &config.theme.font)?,
         screencopy,
         config,
@@ -172,6 +188,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
         batch_counter: 0,
         overlay: None,
         pending_windows: Vec::new(),
+        window_capture: None,
+        window_fallback: None,
         delivered,
         exit: false,
     };
@@ -256,11 +274,8 @@ impl App {
             }
             Request::Window { pick: false, .. } => {
                 let windows = crate::windows::visible_windows(&outputs)?;
-                let window = windows.iter().find(|w| w.focused).ok_or_else(|| anyhow::anyhow!("no focused window"))?;
-                let desktop = outputs.iter().map(|o| o.logical).reduce(|a, b| a.union(&b)).unwrap_or_default();
-                let rect = window.rect.intersect(&desktop).ok_or_else(|| anyhow::anyhow!("the focused window is off screen"))?.rounded();
-                let on: Vec<OutputMeta> = outputs.into_iter().filter(|o| o.logical.intersect(&rect).is_some()).collect();
-                self.capture_final(Area::Rect(rect), Action::Default, on);
+                let window = windows.into_iter().find(|w| w.focused).ok_or_else(|| anyhow::anyhow!("no focused window"))?;
+                self.capture_window(window, Action::Default, Vec::new());
                 Ok(())
             }
             Request::Window { pick: true, .. } => {
@@ -327,6 +342,11 @@ impl App {
                 return self.deliver(image, action);
             }
             Outcome::Failed(e) => return self.finish(Response::Error(e)),
+            Outcome::Window(window) => {
+                // Hide the picker now; the window itself is captured directly.
+                overlay.hide(&self.qh);
+                return self.capture_window(window, Action::Default, frozen);
+            }
         };
         if !frozen.is_empty() {
             self.overlay = None;
@@ -341,6 +361,81 @@ impl App {
             app.capture_after_hide();
             TimeoutAction::Drop
         });
+    }
+
+    /// Captures `window` on its own (nothing stacked above it), falling back to its screen area.
+    fn capture_window(&mut self, window: Window, action: Action, frozen: Vec<OutputFrame>) {
+        let desktop = self.output_metas().iter().map(|o| o.logical).reduce(|a, b| a.union(&b)).unwrap_or_default();
+        let Some(on_screen) = window.rect.intersect(&desktop).map(|r| r.rounded()) else {
+            return self.finish(Response::Error("that window is off screen".into()));
+        };
+        self.window_fallback = Some(WindowFallback { on_screen, whole: window.rect, frozen });
+        self.batch_counter += 1;
+        let id = self.batch_counter;
+        match WindowCapture::start(id, &self.toplevels, &window, self.config.show_cursor, &self.qh) {
+            Some(capture) => {
+                self.window_capture = Some(capture);
+                self.set_stage(Stage::WindowCapture(action));
+                let _ = self.handle.insert_source(Timer::from_duration(CAPTURE_TIMEOUT), move |_, _, app: &mut App| {
+                    if app.window_capture.as_ref().is_some_and(|c| c.id == id) {
+                        app.window_capture = None;
+                        app.window_captured(Err("the window capture timed out".into()));
+                    }
+                    TimeoutAction::Drop
+                });
+            }
+            None => {
+                log::info!("can't capture {:?} on its own; using its screen area", window.title);
+                self.window_area_capture(action);
+            }
+        }
+    }
+
+    pub fn window_captured(&mut self, result: Result<Image, String>) {
+        let Some(Stage::WindowCapture(action)) = self.job.as_ref().map(|j| j.stage) else { return };
+        match result {
+            Ok(image) => {
+                let whole = self.window_fallback.take().map(|f| f.whole).unwrap_or_default();
+                self.overlay = None;
+                let _ = self.conn.flush();
+                if self.annotating() {
+                    self.open_editor(Area::Rect(whole), whole, image);
+                } else {
+                    self.deliver(image, action);
+                }
+            }
+            Err(e) => {
+                log::warn!("{e}; capturing the window's screen area instead");
+                self.window_area_capture(action);
+            }
+        }
+    }
+
+    /// The fallback: the window's area of the screen, overlaps and all.
+    fn window_area_capture(&mut self, action: Action) {
+        let Some(fallback) = self.window_fallback.take() else {
+            return self.finish(Response::Error("window capture lost track of the window".into()));
+        };
+        let area = Area::Rect(fallback.on_screen);
+        if !fallback.frozen.is_empty() {
+            self.overlay = None;
+            let _ = self.conn.flush();
+            return self.compose_and_deliver(area, action, &fallback.frozen);
+        }
+        match &self.overlay {
+            // A live picker is being hidden: capture once it's off screen.
+            Some(overlay) if !overlay.hidden_presented() => {
+                self.set_stage(Stage::Hiding(area, action));
+                let _ = self.handle.insert_source(Timer::from_duration(HIDE_TIMEOUT), |_, _, app: &mut App| {
+                    app.capture_after_hide();
+                    TimeoutAction::Drop
+                });
+            }
+            _ => {
+                self.set_stage(Stage::Hiding(area, action));
+                self.capture_after_hide();
+            }
+        }
     }
 
     fn capture_after_hide(&mut self) {
@@ -474,6 +569,10 @@ impl App {
     fn finish(&mut self, response: Response) {
         self.overlay = None;
         self.pending_windows.clear();
+        self.window_fallback = None;
+        if let Some(capture) = self.window_capture.take() {
+            capture.cancel();
+        }
         self.capture = None;
         if let Response::Error(e) = &response {
             log::error!("{e}");

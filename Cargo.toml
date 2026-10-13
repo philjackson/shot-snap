@@ -9,6 +9,7 @@ wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = "0.31"
 femtovg = { version = "0.27", default-features = false, features = ["textlayout"] }
 glutin = { version = "0.32", default-features = false, features = ["egl", "wayland"] }
 raw-window-handle = "0.6"

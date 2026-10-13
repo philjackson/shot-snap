@@ -23,9 +23,13 @@ shot-snap fullscreen DP-2 -a
 shot-snap window pick -a
 ```
 
-Window capture asks the compositor where windows are (Hyprland, Sway and Niri are supported) and
-captures that area of the screen, so anything overlapping the window is included, as in Noctalia's
-old window mode. Only windows on the workspaces currently shown can be picked.
+Window capture asks the compositor where windows are (Hyprland, Sway and Niri are supported). Where
+the compositor can capture a single window (`ext-image-copy-capture` with toplevel sources, e.g.
+Hyprland and Sway 1.11+), you get just that window, even if other windows are on top of it. That
+means no compositor border, rounded corners or shadow, and popup menus aren't included. Otherwise,
+or if the window can't be matched for certain, its area of the screen is captured, overlaps and
+all. On Hyprland windows are matched exactly; elsewhere by title and app id. Only windows on the
+workspaces currently shown can be picked.
 
 The first command starts a small background daemon (`shot-snap daemon`) that stays resident, so
 later captures are instant and the clipboard keeps serving the image after the overlay closes.
