@@ -139,3 +139,7 @@ cargo build --release
 ```
 
 Requires wayland, libxkbcommon, mesa (EGL) and fontconfig.
+
+## License
+
+MIT

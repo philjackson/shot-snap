@@ -2,6 +2,7 @@
 name = "shot-snap"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "xkbcommon"] }
