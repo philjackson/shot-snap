@@ -169,13 +169,15 @@ impl StylePanel {
         if !self.contains(p) {
             return Press::Outside;
         }
-        let swatch = self.backdrop_swatch;
-        if (Rect { x: swatch.x - 4.0, y: swatch.y - 4.0, w: swatch.w + 8.0, h: swatch.h + 8.0 }).contains(p) {
-            return Press::EditBackdrop;
-        }
         if let Some((_, switch)) = self.switches.iter().find(|(r, _)| r.contains(p)) {
             switch.toggle(style);
-        } else if let Some(&(track, slider)) = self.sliders.iter().find(|(r, _)| Rect { y: r.y - 8.0, h: r.h + 16.0, ..*r }.contains(p)) {
+            return Press::Handled;
+        }
+        // Only offered while there's a backdrop to see.
+        if style.enabled && style.background && self.backdrop_swatch.contains(p) {
+            return Press::EditBackdrop;
+        }
+        if let Some(&(track, slider)) = self.sliders.iter().find(|(r, _)| Rect { y: r.y - 8.0, h: r.h + 16.0, ..*r }.contains(p)) {
             self.drag = Some((slider, track));
             self.motion(p, style);
         }
@@ -204,6 +206,7 @@ impl StylePanel {
         self.panel = rect(x0, top, w, h);
         self.switches.clear();
         self.sliders.clear();
+        self.backdrop_swatch = Rect::default();
         card(canvas, (x0, top, w, h), 12.0, t.surface.with_alpha(0.94), t.outline);
 
         let x = x0 + PAD;
@@ -231,11 +234,11 @@ impl StylePanel {
                     let mut dot = Path::new();
                     dot.circle(if on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 }, cy, sh / 2.0 - 3.0);
                     canvas.fill_path(&dot, &Paint::color(knob.with_alpha(alpha).fv()));
-                    // The backdrop's own colour; click it to change it.
-                    if *switch == Switch::Background {
+                    // The backdrop's own colour; click it to change it. Only while it's shown.
+                    if *switch == Switch::Background && style.enabled && style.background {
                         let r = rect(sx - GAP - 18.0, cy - 9.0, 18.0, 18.0);
                         crate::picker::swatch(canvas, r, &style.backdrop, editing_backdrop, t, false);
-                        self.backdrop_swatch = r;
+                        self.backdrop_swatch = Rect { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
                     }
                     self.switches.push((rect(sx - 4.0, cy - ROW_H / 2.0, sw + 8.0, ROW_H), *switch));
                 }

@@ -37,6 +37,15 @@ pub enum Tab {
     Gradient,
 }
 
+/// Where the panel goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Placement {
+    /// Centred under a button, kept on screen.
+    Under(Rect),
+    /// With its left edge at `x` (the caller has made sure it fits).
+    LeftEdge(f32),
+}
+
 /// Which colour the picker is editing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
@@ -156,6 +165,7 @@ impl Picker {
     }
 
     /// Opens the picker on `target`'s colour, or closes it if it's already showing that.
+    /// Reopening on the same colour keeps each tab's last solid / gradient and the selected stop.
     pub fn open_for(&mut self, target: Target) {
         if self.open && self.target == target {
             self.close();
@@ -164,7 +174,9 @@ impl Picker {
         if self.open {
             self.close();
         }
-        self.retarget(target);
+        if self.target != target {
+            self.retarget(target);
+        }
         self.open = true;
     }
 
@@ -365,10 +377,14 @@ impl Picker {
 
     // ---- drawing -------------------------------------------------------------------------
 
-    /// Lays the panel out under `anchor` (the toolbar's colour button), clamped to `surface_w`.
-    fn layout(&self, anchor: Rect, top: f32, surface_w: f32) -> Layout {
-        let w = CONTENT_W + 2.0 * PAD;
-        let x0 = ((anchor.x + anchor.w / 2.0) as f32 - w / 2.0).clamp(8.0, (surface_w - w - 8.0).max(8.0)).round();
+    /// Lays the panel out at `placement`, with its top at `top`.
+    fn layout(&self, placement: Placement, top: f32, surface_w: f32) -> Layout {
+        let w = PANEL_W;
+        let x0 = match placement {
+            Placement::Under(anchor) => ((anchor.x + anchor.w / 2.0) as f32 - w / 2.0).clamp(8.0, (surface_w - w - 8.0).max(8.0)),
+            Placement::LeftEdge(x) => x,
+        }
+        .round();
         let x = x0 + PAD;
         let mut y = top + PAD;
         let mut l = Layout { tabs: [rect(x, y, CONTENT_W / 2.0, TAB_H), rect(x + CONTENT_W / 2.0, y, CONTENT_W / 2.0, TAB_H)], ..Layout::default() };
@@ -415,8 +431,8 @@ impl Picker {
         l
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, anchor: Rect, top: f32, surface_w: f32) {
-        self.layout = self.layout(anchor, top, surface_w);
+    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, placement: Placement, top: f32, surface_w: f32) {
+        self.layout = self.layout(placement, top, surface_w);
         let l = &self.layout;
         card(canvas, f(l.panel), RADIUS_XL, t.surface.with_alpha(0.94), t.outline);
 
@@ -596,5 +612,19 @@ mod tests {
         // Back on the annotation colour, the editor shows that colour again.
         p.open_for(Target::Annotation);
         assert_eq!(p.last_solid, match annotation { Fill::Solid(c) => c, _ => unreachable!() });
+    }
+
+    #[test]
+    fn reopening_keeps_each_tabs_memory() {
+        let mut p = Picker::new(AnnotateState::default());
+        p.open_for(Target::Annotation);
+        p.set_tab(Tab::Gradient);
+        p.choose_gradient(default_gradients()[3].clone());
+        p.stop = 1;
+        p.set_tab(Tab::Solid);
+        p.close();
+        p.open_for(Target::Annotation);
+        p.set_tab(Tab::Gradient);
+        assert_eq!(p.last_gradient, default_gradients()[3]);
     }
 }

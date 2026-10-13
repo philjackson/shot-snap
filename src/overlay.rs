@@ -947,14 +947,6 @@ impl Overlay {
             self.redraw_all(qh);
             return None;
         }
-        // Esc closes the colour panel before it closes the editor.
-        if keysym == Keysym::Escape && self.picker_open() {
-            if let Some(picker) = &mut self.picker {
-                picker.close();
-            }
-            self.redraw_all(qh);
-            return None;
-        }
         if keysym == Keysym::Escape {
             return Some(Outcome::Cancel);
         }
@@ -1025,8 +1017,10 @@ impl Overlay {
         let (avail_w, avail_h) = ((w - 2.0 * f64::from(SPACE_LG)).max(1.0), (h - top - f64::from(SPACE_LG)).max(1.0));
         let (iw, ih) = (f64::from(e.image.width), f64::from(e.image.height));
         // With styling on, leave room for the frame (its padding is in image pixels too).
-        let style = self.picker.as_ref().map(|p| p.state().style.clone()).unwrap_or_default();
-        let frame = if style.enabled { 2.0 * f64::from(style.padding.max(0)) } else { 0.0 };
+        let frame = match self.picker.as_ref().map(|p| &p.state().style) {
+            Some(style) if style.enabled => 2.0 * f64::from(style.padding.max(0)),
+            _ => 0.0,
+        };
         let fit = device.max((iw + frame) / avail_w).max((ih + frame) / avail_h).max(0.1);
         let (dw, dh) = (iw / fit, ih / fit);
         // Snap the origin to device pixels so a 1:1 image isn't resampled.
@@ -1042,7 +1036,14 @@ impl Overlay {
         let Some(picker) = &mut self.picker else { return false };
         match self.style_panel.press(local, &mut picker.state_mut().style) {
             style_panel::Press::Outside => false,
-            style_panel::Press::Handled => true,
+            style_panel::Press::Handled => {
+                // Switching the backdrop off (or styling off) leaves nothing to colour.
+                let style = &picker.state().style;
+                if picker.open && picker.target() == Target::Backdrop && !(style.enabled && style.background) {
+                    picker.close();
+                }
+                true
+            }
             style_panel::Press::EditBackdrop => {
                 picker.open_for(Target::Backdrop);
                 true
@@ -1117,7 +1118,8 @@ impl Overlay {
                 shape.fill = fill;
             }
         }
-        let picker_open = self.picker_open();
+        // The colour button is only "open" while the selector is on the annotation colour.
+        let picker_open = self.picker.as_ref().is_some_and(|p| p.open && p.target() == Target::Annotation);
         let tool_width = self.tool_width();
         let toolbar_state = ToolbarState {
             hover: self.hover_button,
@@ -1239,8 +1241,10 @@ impl Overlay {
                         // device resolution, behind the live image.
                         let device = f64::from(s.phys.0) / f64::from(w);
                         let scale = (device / (e.fit * 2.0)).min(1.0);
-                        let key = StyleKey { style: style.clone(), size: (e.image.width, e.image.height), scale: scale.to_bits() };
-                        if s.style_frame.as_ref().is_none_or(|(k, _)| *k != key) {
+                        let (size, scale_bits) = ((e.image.width, e.image.height), scale.to_bits());
+                        let stale = s.style_frame.as_ref().is_none_or(|(k, _)| k.style != style || k.size != size || k.scale != scale_bits);
+                        if stale {
+                            let key = StyleKey { style: style.clone(), size, scale: scale_bits };
                             if let Some((_, old)) = s.style_frame.take() {
                                 canvas.delete_image(old);
                             }
@@ -1284,12 +1288,8 @@ impl Overlay {
                 // The colour selector hangs under the colour button, or beside the style panel
                 // when it's editing the backdrop.
                 let placement = match self.picker.as_ref().map(|p| p.target()) {
-                    Some(Target::Backdrop) if style_open => {
-                        let panel = self.style_panel.rect();
-                        let pw = f64::from(picker::PANEL_W);
-                        Some((Rect { x: panel.x - SPACE_SM as f64 - pw, y: panel.y, w: pw, h: 0.0 }, panel.y as f32))
-                    }
-                    _ => s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).zip(s.toolbar).map(|((r, _), bar)| (*r, bar.bottom() as f32 + SPACE_SM)),
+                    Some(Target::Backdrop) if style_open => Some(beside(self.style_panel.rect(), w)),
+                    _ => s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).zip(s.toolbar).map(|((r, _), bar)| (picker::Placement::Under(*r), bar.bottom() as f32 + SPACE_SM)),
                 };
                 if let (Some(picker), Some((anchor, top))) = (self.picker.as_mut().filter(|p| p.open), placement) {
                     picker.draw(canvas, font, t, anchor, top, w);
@@ -1310,6 +1310,22 @@ impl Overlay {
         }
 
         present(s, qh)
+    }
+}
+
+/// Where the backdrop's colour selector goes relative to the style panel: to its left if there's
+/// room, else to its right, else underneath, so it never covers the panel's controls.
+fn beside(panel: Rect, surface_w: f32) -> (picker::Placement, f32) {
+    let (pw, gap, margin) = (picker::PANEL_W, SPACE_SM, 8.0);
+    let left = panel.x as f32 - gap - pw;
+    let right = panel.right() as f32 + gap;
+    if left >= margin {
+        (picker::Placement::LeftEdge(left), panel.y as f32)
+    } else if right + pw <= surface_w - margin {
+        (picker::Placement::LeftEdge(right), panel.y as f32)
+    } else {
+        let x = (panel.x as f32).clamp(margin, (surface_w - pw - margin).max(margin));
+        (picker::Placement::LeftEdge(x), panel.bottom() as f32 + gap)
     }
 }
 
@@ -1797,4 +1813,34 @@ fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color
         .with_line_cap(femtovg::LineCap::Round)
         .with_line_join(femtovg::LineJoin::Round);
     canvas.stroke_path(&path, &paint);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panel(x: f64) -> Rect {
+        Rect { x, y: 68.0, w: 304.0, h: 294.0 }
+    }
+
+    #[test]
+    fn backdrop_selector_never_covers_the_style_panel() {
+        let pw = f64::from(picker::PANEL_W);
+        let overlaps = |p: Rect, (placement, top): (picker::Placement, f32)| {
+            let picker::Placement::LeftEdge(x) = placement else { panic!("expected a left edge") };
+            let sel = Rect { x: f64::from(x), y: f64::from(top), w: pw, h: 400.0 };
+            sel.intersect(&p).is_some()
+        };
+        // Room on the left: goes left.
+        let wide = panel(1745.0);
+        assert!(matches!(beside(wide, 3440.0).0, picker::Placement::LeftEdge(x) if f64::from(x) + pw <= 1745.0));
+        // Panel near the left edge: flips right, still clear of it.
+        let near_left = panel(100.0);
+        assert!(!overlaps(near_left, beside(near_left, 1920.0)));
+        // Too narrow for either side: drops below.
+        let narrow = panel(150.0);
+        let (_, top) = beside(narrow, 600.0);
+        assert!(f64::from(top) >= narrow.bottom());
+        assert!(!overlaps(narrow, beside(narrow, 600.0)));
+    }
 }
