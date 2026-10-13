@@ -1,20 +1,22 @@
 //! "Screenshot style": the capture on a padded backdrop with rounded corners and a soft drop
-//! shadow. A port of Noctalia's `applyScreenshotStyle`, except the backdrop is the colour panel's
-//! current fill (solid or gradient) instead of its own gradient presets.
+//! shadow. A port of Noctalia's `applyScreenshotStyle`; the backdrop is any solid or gradient
+//! fill, picked with the same colour selector as the annotations.
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Color;
 use crate::geom::Rect;
 use crate::image::Image;
-use crate::paint::Fill;
+use crate::paint::{Fill, Gradient, Stop};
 
 /// Lengths are in image pixels, as in Noctalia.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Style {
     pub enabled: bool,
     pub background: bool,
+    /// The backdrop's own colour, separate from the annotations'.
+    pub backdrop: Fill,
     pub padding: i32,
     pub radius: i32,
     pub shadow: bool,
@@ -30,6 +32,7 @@ impl Default for Style {
         Self {
             enabled: false,
             background: true,
+            backdrop: default_backdrop(),
             padding: 64,
             radius: 12,
             shadow: true,
@@ -39,6 +42,12 @@ impl Default for Style {
             shadow_offset_y: 16,
         }
     }
+}
+
+/// Noctalia's default style backdrop: its theme gradient, primary to tertiary, at 135°.
+pub fn default_backdrop() -> Fill {
+    let hex = |h: u32| Color { r: ((h >> 16) & 0xff) as f32 / 255.0, g: ((h >> 8) & 0xff) as f32 / 255.0, b: (h & 0xff) as f32 / 255.0, a: 1.0 };
+    Fill::Gradient(Gradient { angle: 135.0, stops: vec![Stop { pos: 0.0, color: hex(0xfff59b) }, Stop { pos: 1.0, color: hex(0x9bfece) }] })
 }
 
 const SHADOW: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
@@ -116,7 +125,8 @@ fn to_byte(v: f32) -> u8 {
 /// `source` on its styled backdrop. `k` scales every length (1 for export; the preview renders
 /// at a lower resolution). A fully transparent source yields just the frame, which is what the
 /// preview draws behind the live image.
-pub fn apply(source: &Image, style: &Style, fill: &Fill, k: f64) -> Image {
+pub fn apply(source: &Image, style: &Style, k: f64) -> Image {
+    let fill = &style.backdrop;
     let len = |v: i32| (f64::from(v) * k).round() as i32;
     let pad = len(style.padding.max(0));
     let (sw, sh) = (source.width as i32, source.height as i32);
@@ -179,7 +189,6 @@ pub fn apply(source: &Image, style: &Style, fill: &Fill, k: f64) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::{Gradient, Stop};
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Image {
         Image { width: w, height: h, data: rgba.repeat((w * h) as usize) }
@@ -197,7 +206,8 @@ mod tests {
     #[test]
     fn pads_and_keeps_the_capture() {
         let src = solid(20, 10, [10, 20, 30, 255]);
-        let out = apply(&src, &plain(), &Fill::Solid(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }), 1.0);
+        let style = Style { backdrop: Fill::Solid(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }), ..plain() };
+        let out = apply(&src, &style, 1.0);
         assert_eq!((out.width, out.height), (40, 30));
         assert_eq!(px(&out, 15, 15), [10, 20, 30, 255]);
         assert_eq!(&px(&out, 2, 2)[..], &[255, 0, 0, 255]);
@@ -207,7 +217,7 @@ mod tests {
     fn gradient_backdrop_runs_corner_to_corner() {
         let (red, blue) = (Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 });
         let g = Gradient { angle: 90.0, stops: vec![Stop { pos: 0.0, color: red }, Stop { pos: 1.0, color: blue }] };
-        let out = apply(&solid(20, 10, [0, 0, 0, 255]), &plain(), &Fill::Gradient(g), 1.0);
+        let out = apply(&solid(20, 10, [0, 0, 0, 255]), &Style { backdrop: Fill::Gradient(g), ..plain() }, 1.0);
         let (left, right) = (px(&out, 0, 15), px(&out, 39, 15));
         assert!(left[0] > 240 && left[2] < 15, "{left:?}");
         assert!(right[2] > 240 && right[0] < 15, "{right:?}");
@@ -216,7 +226,7 @@ mod tests {
     #[test]
     fn rounds_corners_and_drops_background_when_off() {
         let style = Style { radius: 8, background: false, ..plain() };
-        let out = apply(&solid(40, 40, [200, 200, 200, 255]), &style, &Fill::default(), 1.0);
+        let out = apply(&solid(40, 40, [200, 200, 200, 255]), &style, 1.0);
         assert_eq!(px(&out, 10, 10)[3], 0, "corner pixel cut away");
         assert_eq!(px(&out, 30, 30), [200, 200, 200, 255]);
         assert_eq!(px(&out, 2, 30)[3], 0, "no backdrop");
@@ -225,7 +235,7 @@ mod tests {
     #[test]
     fn shadow_falls_below_with_offset() {
         let style = Style { background: false, shadow: true, shadow_blur: 4, shadow_offset_y: 8, padding: 20, ..plain() };
-        let out = apply(&solid(20, 20, [255, 255, 255, 255]), &style, &Fill::default(), 1.0);
+        let out = apply(&solid(20, 20, [255, 255, 255, 255]), &style, 1.0);
         let (above, below) = (px(&out, 30, 12)[3], px(&out, 30, 45)[3]);
         assert!(below > above + 40, "above {above} below {below}");
     }

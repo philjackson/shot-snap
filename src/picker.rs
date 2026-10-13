@@ -14,6 +14,8 @@ use crate::ui::{card, text_paint, text_width};
 
 const PAD: f32 = 12.0;
 const CONTENT_W: f32 = 254.0;
+/// Full panel width.
+pub const PANEL_W: f32 = CONTENT_W + 2.0 * PAD;
 const SWATCH: f32 = 20.0;
 const GAP: f32 = 6.0;
 const TAB_H: f32 = 28.0;
@@ -33,6 +35,15 @@ const REMOVE_DISTANCE: f64 = 36.0;
 pub enum Tab {
     Solid,
     Gradient,
+}
+
+/// Which colour the picker is editing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    /// What new annotations are painted with.
+    Annotation,
+    /// The screenshot style backdrop.
+    Backdrop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +72,7 @@ struct Layout {
 
 pub struct Picker {
     pub open: bool,
+    target: Target,
     tab: Tab,
     state: AnnotateState,
     /// What each tab returns to when switched back to.
@@ -89,31 +101,74 @@ fn f(r: Rect) -> (f32, f32, f32, f32) {
 
 impl Picker {
     pub fn new(state: AnnotateState) -> Self {
-        let last_solid = match &state.fill {
-            Fill::Solid(c) => *c,
-            Fill::Gradient(_) => state.recent_solids.first().copied().unwrap_or(DEFAULT_SOLIDS[0]),
-        };
-        let last_gradient = match &state.fill {
-            Fill::Gradient(g) => g.clone(),
-            Fill::Solid(_) => state.recent_gradients.first().cloned().unwrap_or_else(|| default_gradients()[0].clone()),
-        };
-        let tab = if matches!(state.fill, Fill::Gradient(_)) { Tab::Gradient } else { Tab::Solid };
         let mut picker = Picker {
             open: false,
-            tab,
+            target: Target::Annotation,
+            tab: Tab::Solid,
             state,
-            last_solid,
-            last_gradient,
+            last_solid: DEFAULT_SOLIDS[0],
+            last_gradient: default_gradients()[0].clone(),
             hsv: Hsv { h: 0.0, s: 0.0, v: 0.0 },
             stop: 0,
             drag: None,
             layout: Layout::default(),
             touched: false,
         };
-        picker.sync_hsv();
+        picker.retarget(Target::Annotation);
         picker
     }
 
+    /// Points the editor at `target`'s colour: its tab, its solid or gradient, its stop.
+    fn retarget(&mut self, target: Target) {
+        self.target = target;
+        let fill = self.target_fill().clone();
+        if let Fill::Solid(c) = &fill {
+            self.last_solid = *c;
+        } else {
+            self.last_solid = self.state.recent_solids.first().copied().unwrap_or(DEFAULT_SOLIDS[0]);
+        }
+        if let Fill::Gradient(g) = &fill {
+            self.last_gradient = g.clone();
+        } else {
+            self.last_gradient = self.state.recent_gradients.first().cloned().unwrap_or_else(|| default_gradients()[0].clone());
+        }
+        self.tab = if matches!(fill, Fill::Gradient(_)) { Tab::Gradient } else { Tab::Solid };
+        self.stop = 0;
+        self.sync_hsv();
+    }
+
+    fn target_fill(&self) -> &Fill {
+        match self.target {
+            Target::Annotation => &self.state.fill,
+            Target::Backdrop => &self.state.style.backdrop,
+        }
+    }
+
+    fn target_fill_mut(&mut self) -> &mut Fill {
+        match self.target {
+            Target::Annotation => &mut self.state.fill,
+            Target::Backdrop => &mut self.state.style.backdrop,
+        }
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// Opens the picker on `target`'s colour, or closes it if it's already showing that.
+    pub fn open_for(&mut self, target: Target) {
+        if self.open && self.target == target {
+            self.close();
+            return;
+        }
+        if self.open {
+            self.close();
+        }
+        self.retarget(target);
+        self.open = true;
+    }
+
+    /// What new annotations are painted with.
     pub fn fill(&self) -> &Fill {
         &self.state.fill
     }
@@ -127,14 +182,6 @@ impl Picker {
         &mut self.state
     }
 
-    pub fn toggle(&mut self) {
-        if self.open {
-            self.close();
-        } else {
-            self.open = true;
-        }
-    }
-
     pub fn close(&mut self) {
         self.open = false;
         self.drag = None;
@@ -144,7 +191,8 @@ impl Picker {
     /// Records the current fill as a recent pick if the user picked something.
     fn commit(&mut self) {
         if std::mem::take(&mut self.touched) {
-            self.state.remember_fill();
+            let fill = self.target_fill().clone();
+            self.state.remember(&fill);
         }
     }
 
@@ -175,7 +223,7 @@ impl Picker {
     }
 
     fn sync_fill(&mut self) {
-        self.state.fill = match self.tab {
+        *self.target_fill_mut() = match self.tab {
             Tab::Solid => Fill::Solid(self.last_solid),
             Tab::Gradient => Fill::Gradient(self.last_gradient.clone()),
         };
@@ -397,7 +445,7 @@ impl Picker {
         }
 
         // Defaults and recents.
-        let current = self.state.fill.clone();
+        let current = self.target_fill().clone();
         match self.tab {
             Tab::Solid => {
                 let colors = DEFAULT_SOLIDS.iter().zip(&l.defaults).chain(self.state.recent_solids.iter().zip(&l.recents));
@@ -521,4 +569,32 @@ pub fn swatch(canvas: &mut Canvas<OpenGl>, r: Rect, fill: &Fill, selected: bool,
     canvas.fill_path(&path, &fill.paint(r));
     let (ring, width) = if selected { (t.on_surface, 2.0) } else { (t.outline, 1.0) };
     canvas.stroke_path(&path, &Paint::color(ring.fv()).with_line_width(width));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_target_edits_only_the_backdrop() {
+        let mut p = Picker::new(AnnotateState::default());
+        let annotation = p.fill().clone();
+        p.open_for(Target::Backdrop);
+        assert_eq!(p.tab, Tab::Gradient, "default backdrop is a gradient");
+        p.set_tab(Tab::Solid);
+        p.choose_solid(DEFAULT_SOLIDS[3]);
+        assert_eq!(p.state().style.backdrop, Fill::Solid(DEFAULT_SOLIDS[3]));
+        assert_eq!(p.fill(), &annotation, "annotation colour untouched");
+
+        // A custom backdrop colour joins the shared recents when the selector closes.
+        p.hsv = Hsv { h: 200.0, s: 0.5, v: 0.5 };
+        p.apply_hsv();
+        let custom = p.hsv.color();
+        p.close();
+        assert_eq!(p.state().recent_solids.first(), Some(&custom));
+
+        // Back on the annotation colour, the editor shows that colour again.
+        p.open_for(Target::Annotation);
+        assert_eq!(p.last_solid, match annotation { Fill::Solid(c) => c, _ => unreachable!() });
+    }
 }

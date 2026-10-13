@@ -6,7 +6,6 @@ use femtovg::{Canvas, FontId, Paint, Path};
 
 use crate::config::Theme;
 use crate::geom::Rect;
-use crate::paint::Fill;
 use crate::style::Style;
 use crate::ui::{card, text_paint, text_width};
 
@@ -123,6 +122,15 @@ impl Switch {
     }
 }
 
+/// What a press on the panel did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Press {
+    Outside,
+    Handled,
+    /// The backdrop swatch: open the colour selector on the backdrop.
+    EditBackdrop,
+}
+
 #[derive(Default)]
 pub struct StylePanel {
     pub open: bool,
@@ -130,6 +138,7 @@ pub struct StylePanel {
     panel: Rect,
     switches: Vec<(Rect, Switch)>,
     sliders: Vec<(Rect, Slider)>,
+    backdrop_swatch: Rect,
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -141,6 +150,11 @@ impl StylePanel {
         self.open && self.panel.contains(p)
     }
 
+    /// Where the panel was last drawn.
+    pub fn rect(&self) -> Rect {
+        self.panel
+    }
+
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
@@ -150,10 +164,14 @@ impl StylePanel {
         self.drag = None;
     }
 
-    /// A press at surface-local `p`. Returns false if it was outside the panel.
-    pub fn press(&mut self, p: (f64, f64), style: &mut Style) -> bool {
+    /// A press at surface-local `p`.
+    pub fn press(&mut self, p: (f64, f64), style: &mut Style) -> Press {
         if !self.contains(p) {
-            return false;
+            return Press::Outside;
+        }
+        let swatch = self.backdrop_swatch;
+        if (Rect { x: swatch.x - 4.0, y: swatch.y - 4.0, w: swatch.w + 8.0, h: swatch.h + 8.0 }).contains(p) {
+            return Press::EditBackdrop;
         }
         if let Some((_, switch)) = self.switches.iter().find(|(r, _)| r.contains(p)) {
             switch.toggle(style);
@@ -161,7 +179,7 @@ impl StylePanel {
             self.drag = Some((slider, track));
             self.motion(p, style);
         }
-        true
+        Press::Handled
     }
 
     pub fn motion(&mut self, p: (f64, f64), style: &mut Style) {
@@ -178,7 +196,8 @@ impl StylePanel {
 
     /// Lays out and draws the panel under `anchor`, kept within `surface_w`.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, style: &Style, fill: &Fill, anchor: Rect, top: f32, surface_w: f32) {
+    /// `editing_backdrop` rings the backdrop swatch while the colour selector is on it.
+    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, style: &Style, editing_backdrop: bool, anchor: Rect, top: f32, surface_w: f32) {
         let w = PAD * 2.0 + LABEL_W + GAP + SLIDER_W + GAP + VALUE_W;
         let h = PAD * 2.0 + ROW_H * ROWS.len() as f32;
         let x0 = ((anchor.x + anchor.w / 2.0) as f32 - w / 2.0).clamp(8.0, (surface_w - w - 8.0).max(8.0)).round();
@@ -212,10 +231,11 @@ impl StylePanel {
                     let mut dot = Path::new();
                     dot.circle(if on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 }, cy, sh / 2.0 - 3.0);
                     canvas.fill_path(&dot, &Paint::color(knob.with_alpha(alpha).fv()));
-                    // The backdrop is the colour panel's paint: show it next to its switch.
+                    // The backdrop's own colour; click it to change it.
                     if *switch == Switch::Background {
-                        let r = rect(sx - GAP - 16.0, cy - 8.0, 16.0, 16.0);
-                        crate::picker::swatch(canvas, r, fill, false, t, false);
+                        let r = rect(sx - GAP - 18.0, cy - 9.0, 18.0, 18.0);
+                        crate::picker::swatch(canvas, r, &style.backdrop, editing_backdrop, t, false);
+                        self.backdrop_swatch = r;
                     }
                     self.switches.push((rect(sx - 4.0, cy - ROW_H / 2.0, sw + 8.0, ROW_H), *switch));
                 }

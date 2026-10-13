@@ -79,8 +79,9 @@ The export uses the same renderer as the editor, so it matches what you see exac
 
 The sparkles button (✦) opens the style panel, after Noctalia's. **Style screenshot** puts the
 capture on a padded backdrop with rounded corners and a soft drop shadow, previewed live around the
-image. The backdrop uses the colour panel's current colour or gradient (including the gradient's
-angle). **Background** turns the backdrop off for a transparent frame. Padding, corner radius and
+image. The backdrop has its own colour: click the swatch next to **Background** to change it with
+the same colour selector (solid or gradient, sharing the recent picks). It starts as Noctalia's
+theme gradient. **Background** turns the backdrop off for a transparent frame. Padding, corner radius and
 shadow blur / opacity / X and Y offset are sliders (in image pixels; defaults 64, 12, 40, 50%, 0,
 16). Copy, Save and Done deliver the styled image. Settings are remembered in the state file.
 

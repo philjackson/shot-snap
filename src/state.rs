@@ -74,9 +74,10 @@ impl AnnotateState {
         self.tool_widths.insert(tool.name().into(), width.clamp(min, max));
     }
 
-    /// Records the current fill as a recent pick, unless it's one of the defaults.
-    pub fn remember_fill(&mut self) {
-        match &self.fill {
+    /// Records `fill` as a recent pick, unless it's one of the defaults. Annotation and backdrop
+    /// picks share the recents.
+    pub fn remember(&mut self, fill: &Fill) {
+        match fill {
             Fill::Solid(c) if !DEFAULT_SOLIDS.contains(c) => push_recent(&mut self.recent_solids, *c),
             Fill::Gradient(g) => {
                 let g = g.normalized();
@@ -152,16 +153,16 @@ mod tests {
     #[test]
     fn recents_dedupe_cap_and_skip_defaults() {
         let mut a = AnnotateState { fill: Fill::Solid(DEFAULT_SOLIDS[1]), ..Default::default() };
-        a.remember_fill();
+        a.remember(&a.fill.clone());
         assert!(a.recent_solids.is_empty());
         for i in 0..12 {
             a.fill = Fill::Solid(Color { r: i as f32 / 20.0, g: 0.0, b: 0.0, a: 1.0 });
-            a.remember_fill();
+            a.remember(&a.fill.clone());
         }
         assert_eq!(a.recent_solids.len(), RECENT_LIMIT);
         let again = a.recent_solids[5];
         a.fill = Fill::Solid(again);
-        a.remember_fill();
+        a.remember(&a.fill.clone());
         assert_eq!(a.recent_solids[0], again);
         assert_eq!(a.recent_solids.iter().filter(|c| **c == again).count(), 1);
     }
