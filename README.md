@@ -2,6 +2,8 @@
 
 Fast screenshots for Wayland, with a built-in annotation editor.
 
+![The annotation editor](docs/screenshots/editor.jpg)
+
 Works on compositors with `wlr-layer-shell` and `wlr-screencopy`: Hyprland, Sway, Niri, river and
 others.
 
@@ -28,6 +30,8 @@ automatically; after updating shot-snap, run `shot-snap --restart-daemon` once.
 ### Selecting a region
 
 Drag to select. Press Esc to cancel.
+
+![Selecting a region](docs/screenshots/region.jpg)
 
 With `confirm_region` or `remember_last_region` on, the selection stays adjustable: drag its edges
 or corners to resize it, drag inside to move it, or drag outside to start again. Then:
@@ -82,6 +86,8 @@ gives finer control.
 
 ### Colours
 
+![The colour picker](docs/screenshots/colours.png)
+
 The colour button opens a picker with two tabs:
 
 - **Solid**: a few presets, your recent colours, and a picker for anything else.
@@ -91,10 +97,14 @@ The colour button opens a picker with two tabs:
 
 ### Screenshot style
 
+![The style panel](docs/screenshots/style.jpg)
+
 The ✦ button frames the screenshot for sharing: a padded background with rounded corners and a
 drop shadow. Click the swatch next to **Background** to choose its colour or gradient, and use
 the sliders for padding, corners and the shadow. With a crop, the frame goes around the cropped
 result.
+
+![A styled screenshot](docs/screenshots/result.jpg)
 
 Your tools, colours and style settings are remembered for next time.
 
