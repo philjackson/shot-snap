@@ -18,34 +18,44 @@ pub enum FullscreenTarget {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    Region,
-    Fullscreen(FullscreenTarget),
+    /// `annotate`: open the editor on the captured image before delivering it.
+    Region { annotate: bool },
+    Fullscreen { target: FullscreenTarget, annotate: bool },
     Ping,
     Quit,
 }
 
 impl Request {
     pub fn encode(&self) -> String {
+        let flag = |annotate: bool| if annotate { " --annotate" } else { "" };
         match self {
-            Request::Region => "region".into(),
-            Request::Fullscreen(FullscreenTarget::Focused) => "fullscreen".into(),
-            Request::Fullscreen(FullscreenTarget::Pick) => "fullscreen pick".into(),
-            Request::Fullscreen(FullscreenTarget::All) => "fullscreen all".into(),
-            Request::Fullscreen(FullscreenTarget::Named(n)) => format!("fullscreen {n}"),
+            Request::Region { annotate } => format!("region{}", flag(*annotate)),
+            Request::Fullscreen { target, annotate } => {
+                let target = match target {
+                    FullscreenTarget::Focused => String::new(),
+                    FullscreenTarget::Pick => " pick".into(),
+                    FullscreenTarget::All => " all".into(),
+                    FullscreenTarget::Named(n) => format!(" {n}"),
+                };
+                format!("fullscreen{target}{}", flag(*annotate))
+            }
             Request::Ping => "ping".into(),
             Request::Quit => "quit".into(),
         }
     }
 
     pub fn parse(args: &[&str]) -> anyhow::Result<Self> {
-        Ok(match args {
-            ["region"] => Request::Region,
-            ["fullscreen"] => Request::Fullscreen(FullscreenTarget::Focused),
-            ["fullscreen", "pick"] => Request::Fullscreen(FullscreenTarget::Pick),
-            ["fullscreen", "all" | "*"] => Request::Fullscreen(FullscreenTarget::All),
-            ["fullscreen", name] => Request::Fullscreen(FullscreenTarget::Named((*name).to_owned())),
-            ["ping"] => Request::Ping,
-            ["quit"] => Request::Quit,
+        let annotate = args.iter().any(|a| matches!(*a, "--annotate" | "-a"));
+        let rest: Vec<&str> = args.iter().copied().filter(|a| !matches!(*a, "--annotate" | "-a")).collect();
+        let fullscreen = |target| Request::Fullscreen { target, annotate };
+        Ok(match rest.as_slice() {
+            ["region"] => Request::Region { annotate },
+            ["fullscreen"] => fullscreen(FullscreenTarget::Focused),
+            ["fullscreen", "pick"] => fullscreen(FullscreenTarget::Pick),
+            ["fullscreen", "all" | "*"] => fullscreen(FullscreenTarget::All),
+            ["fullscreen", name] if !name.starts_with('-') => fullscreen(FullscreenTarget::Named((*name).to_owned())),
+            ["ping"] if !annotate => Request::Ping,
+            ["quit"] if !annotate => Request::Quit,
             _ => bail!("unknown command: {}", args.join(" ")),
         })
     }
@@ -130,5 +140,27 @@ fn spawn_daemon_and_connect() -> anyhow::Result<UnixStream> {
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => bail!("daemon did not start: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotate_flag_round_trips() {
+        for args in [&["region"][..], &["region", "--annotate"], &["fullscreen", "-a"], &["fullscreen", "DP-1", "--annotate"], &["fullscreen", "--annotate", "pick"], &["fullscreen", "all"]] {
+            let req = Request::parse(args).unwrap();
+            let encoded = req.encode();
+            let reparsed = Request::parse(&encoded.split_whitespace().collect::<Vec<_>>()).unwrap();
+            assert_eq!(req, reparsed, "{args:?}");
+        }
+        assert_eq!(Request::parse(&["region", "-a"]).unwrap(), Request::Region { annotate: true });
+        assert_eq!(
+            Request::parse(&["fullscreen", "--annotate", "pick"]).unwrap(),
+            Request::Fullscreen { target: FullscreenTarget::Pick, annotate: true }
+        );
+        assert!(Request::parse(&["annotate"]).is_err());
+        assert!(Request::parse(&["quit", "--annotate"]).is_err());
     }
 }

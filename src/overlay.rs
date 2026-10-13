@@ -1,4 +1,5 @@
-//! Full-screen layer surfaces (one per output) for region selection and the display picker.
+//! Full-screen layer surfaces (one per output) for region selection, the display picker and
+//! annotation.
 //! Everything is laid out in logical pixels; each canvas is scaled to the output's physical
 //! resolution so frozen frames show 1:1 and lines stay crisp under fractional scaling.
 
@@ -16,13 +17,14 @@ use wayland_client::QueueHandle;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
+use crate::annotate::{self, Shape as Annotation};
 use crate::app::App;
 use crate::capture::{NoEvents, OutputMeta};
 use crate::config::{Color, Theme};
 use crate::deliver::Action;
 use crate::geom::Rect;
 use crate::gl::{Gl, GlSurface};
-use crate::image::OutputFrame;
+use crate::image::{Image, OutputFrame};
 
 const BORDER_WIDTH: f32 = 2.0;
 const HANDLE_MARGIN: f64 = 15.0;
@@ -37,18 +39,38 @@ const SPACE_SM: f32 = 8.0;
 const SPACE_MD: f32 = 12.0;
 const BTN_LEFT: u32 = 0x110;
 const MIN_SELECTION: f64 = 2.0;
+const RADIUS_XL: f32 = 12.0;
+const CONTROL_SM: f32 = 32.0;
+const ICON: f32 = 16.0;
+const TOOLBAR_FILL_ALPHA: f32 = 0.9;
+const SPACE_LG: f32 = 16.0;
+const SURROUND_ALPHA: f32 = 0.85;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Region,
     Picker,
+    /// Editing one captured image, shown on a single output under the toolbar.
+    Annotate,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Region(Rect, Action),
     Picked(u32),
+    Annotated(Vec<Annotation>, Action),
     Cancel,
+}
+
+/// Something clickable drawn on a surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Hit {
+    Output(u32),
+    RectangleTool,
+    Copy,
+    Save,
+    Done,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -84,6 +106,7 @@ enum Drag {
     Select { anchor: (f64, f64) },
     Move { grab: (f64, f64) },
     Resize { edges: Edges, orig: Rect },
+    Draw { anchor: (f64, f64) },
 }
 
 struct Surf {
@@ -96,7 +119,19 @@ struct Surf {
     phys: (u32, u32),
     frame_pending: bool,
     dirty: bool,
-    buttons: Vec<(Rect, u32)>,
+    /// Hit boxes in surface-local coordinates, from the last draw.
+    buttons: Vec<(Rect, Hit)>,
+    toolbar: Option<Rect>,
+}
+
+/// The image being annotated. Annotations are kept in image pixels.
+struct Editor {
+    image: Image,
+    /// Image pixels per desktop logical pixel, so strokes keep their logical weight.
+    scale: f64,
+    /// Where the image was last drawn (surface-local logical) and image pixels per logical pixel there.
+    canvas: Rect,
+    fit: f64,
 }
 
 pub struct Overlay {
@@ -109,7 +144,11 @@ pub struct Overlay {
     confirm: bool,
     drag: Drag,
     pointer: Option<(f64, f64)>,
-    hover_button: Option<u32>,
+    hover_button: Option<Hit>,
+    /// The pointer is over a toolbar card, so presses don't draw.
+    over_toolbar: bool,
+    annotations: Vec<Annotation>,
+    editor: Option<Editor>,
     theme: Theme,
     hidden: bool,
 }
@@ -143,7 +182,7 @@ impl Overlay {
                 layer.set_exclusive_zone(-1);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
                 layer.commit();
-                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new() }
+                Surf { meta, layer, viewport, gl: None, texture: None, size: (0, 0), phys: (0, 0), frame_pending: false, dirty: true, buttons: Vec::new(), toolbar: None }
             })
             .collect();
         let preselect = preselect.and_then(|r| r.intersect(&desktop)).filter(|r| r.w >= MIN_SELECTION && r.h >= MIN_SELECTION);
@@ -158,8 +197,35 @@ impl Overlay {
             drag: Drag::None,
             pointer: None,
             hover_button: None,
+            over_toolbar: false,
+            annotations: Vec::new(),
+            editor: None,
             theme,
             hidden: false,
+        }
+    }
+
+    /// The annotation editor for an already-captured image, on `output` only.
+    pub fn new_editor(init: Init, output: OutputMeta, image: Image, scale: f64, theme: Theme) -> Self {
+        let mut overlay = Self::new(init, Mode::Annotate, vec![output], Vec::new(), theme, false, None);
+        overlay.editor = Some(Editor { image, scale, canvas: Rect::default(), fit: 1.0 });
+        overlay
+    }
+
+    pub fn take_image(&mut self) -> Option<Image> {
+        self.editor.take().map(|e| e.image)
+    }
+
+    /// Global pointer position to image pixels (unclamped).
+    fn to_image(&self, p: (f64, f64)) -> Option<(f64, f64)> {
+        let (e, s) = (self.editor.as_ref()?, self.surfs.first()?);
+        Some(((p.0 - s.meta.logical.x - e.canvas.x) * e.fit, (p.1 - s.meta.logical.y - e.canvas.y) * e.fit))
+    }
+
+    fn clamp_image(&self, p: (f64, f64)) -> (f64, f64) {
+        match &self.editor {
+            Some(e) => (p.0.clamp(0.0, f64::from(e.image.width)), p.1.clamp(0.0, f64::from(e.image.height))),
+            None => p,
         }
     }
 
@@ -205,9 +271,15 @@ impl Overlay {
         match &mut s.gl {
             None => {
                 let mut surface = gl.create_surface(s.layer.wl_surface(), phys.0, phys.1)?;
-                if let Some(frame) = self.frozen.get(&s.meta.id) {
-                    let img = femtovg::imgref::Img::new(rgba_pixels(&frame.image.data), frame.image.width as usize, frame.image.height as usize);
-                    s.texture = surface.canvas.create_image(img.as_ref(), ImageFlags::NEAREST).ok();
+                // Frozen frames show 1:1; the editor image may be scaled down to fit.
+                let source = match (&self.editor, self.frozen.get(&s.meta.id)) {
+                    (Some(e), _) => Some((&e.image, ImageFlags::GENERATE_MIPMAPS)),
+                    (None, Some(frame)) => Some((&frame.image, ImageFlags::NEAREST)),
+                    (None, None) => None,
+                };
+                if let Some((image, flags)) = source {
+                    let img = femtovg::imgref::Img::new(rgba_pixels(&image.data), image.width as usize, image.height as usize);
+                    s.texture = surface.canvas.create_image(img.as_ref(), flags).ok();
                 }
                 s.gl = Some(surface);
             }
@@ -248,6 +320,9 @@ impl Overlay {
         match (self.mode, self.drag) {
             (Mode::Picker, _) if self.hover_button.is_some() => Shape::Pointer,
             (Mode::Picker, _) => Shape::Default,
+            (Mode::Annotate, Drag::None) if self.hover_button.is_some() => Shape::Pointer,
+            (Mode::Annotate, Drag::None) if self.over_toolbar => Shape::Default,
+            (_, Drag::Draw { .. }) => Shape::Crosshair,
             (_, Drag::Move { .. }) => Shape::Grabbing,
             (_, Drag::Resize { edges, .. }) => edges.cursor(),
             (_, Drag::Select { .. }) => Shape::Crosshair,
@@ -324,11 +399,12 @@ impl Overlay {
                 }
                 self.selection = Some(Rect::from_points(a, b));
             }
-            Drag::None => {}
+            Drag::None | Drag::Draw { .. } => {}
         }
-        if self.mode == Mode::Picker {
-            let local = (pos.0, pos.1);
-            self.hover_button = self.surfs[i].buttons.iter().find(|(r, _)| r.contains(local)).map(|(_, id)| *id);
+        if self.drag == Drag::None {
+            let s = &self.surfs[i];
+            self.hover_button = s.buttons.iter().find(|(r, _)| r.contains(pos)).map(|(_, hit)| *hit);
+            self.over_toolbar = s.toolbar.is_some_and(|r| r.contains(pos));
         }
         self.redraw_all(qh);
     }
@@ -340,10 +416,38 @@ impl Overlay {
         let p = self.pointer?;
         let outcome = match (self.mode, pressed) {
             (Mode::Picker, true) => {
-                let id = self.hover_button.or_else(|| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id))?;
+                let id = match self.hover_button {
+                    Some(Hit::Output(id)) => id,
+                    _ => self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id)?,
+                };
                 return Some(Outcome::Picked(id));
             }
             (Mode::Picker, false) => None,
+            (Mode::Annotate, true) => match self.hover_button {
+                Some(Hit::Copy) => return Some(self.annotated(Action::Copy)),
+                Some(Hit::Save) => return Some(self.annotated(Action::Save)),
+                Some(Hit::Done) => return Some(self.annotated(Action::Default)),
+                Some(Hit::Close) => return Some(Outcome::Cancel),
+                _ if self.over_toolbar => None,
+                _ => {
+                    // Drawing starts on the image; the drag may then leave it and is clamped.
+                    if let Some(ip) = self.to_image(p).filter(|&ip| self.clamp_image(ip) == ip) {
+                        self.drag = Drag::Draw { anchor: ip };
+                    }
+                    None
+                }
+            },
+            (Mode::Annotate, false) => {
+                if let (Drag::Draw { anchor }, Some(ip)) = (std::mem::replace(&mut self.drag, Drag::None), self.to_image(p)) {
+                    let rect = Rect::from_points(anchor, self.clamp_image(ip));
+                    let scale = self.editor.as_ref().map_or(1.0, |e| e.scale);
+                    // Ignore clicks: the rectangle must be at least a couple of logical pixels.
+                    if rect.w >= MIN_SELECTION * scale && rect.h >= MIN_SELECTION * scale {
+                        self.annotations.push(Annotation { rect, width: annotate::DEFAULT_WIDTH * scale, color: annotate::DEFAULT_COLOR });
+                    }
+                }
+                None
+            }
             (Mode::Region, true) => {
                 self.drag = self.handle_at().unwrap_or(Drag::Select { anchor: self.clamp_point(p) });
                 if let Drag::Select { anchor } = self.drag {
@@ -370,12 +474,26 @@ impl Overlay {
         outcome
     }
 
-    pub fn key(&mut self, keysym: Keysym, mods: Modifiers) -> Option<Outcome> {
+    pub fn key(&mut self, keysym: Keysym, mods: Modifiers, qh: &QueueHandle<App>) -> Option<Outcome> {
         if self.hidden {
             return None;
         }
         if keysym == Keysym::Escape {
             return Some(Outcome::Cancel);
+        }
+        if self.mode == Mode::Annotate {
+            return match keysym {
+                _ if self.drag != Drag::None => None,
+                Keysym::Return | Keysym::KP_Enter if !mods.ctrl => Some(self.annotated(Action::Default)),
+                Keysym::c | Keysym::C if mods.ctrl => Some(self.annotated(Action::Copy)),
+                Keysym::s | Keysym::S if mods.ctrl => Some(self.annotated(Action::Save)),
+                Keysym::z | Keysym::Z if mods.ctrl => {
+                    self.annotations.pop();
+                    self.redraw_all(qh);
+                    None
+                }
+                _ => None,
+            };
         }
         let sel = self.selection.filter(|_| self.mode == Mode::Region && self.awaiting && self.drag == Drag::None)?;
         match keysym {
@@ -384,6 +502,31 @@ impl Overlay {
             Keysym::s | Keysym::S if mods.ctrl => Some(Outcome::Region(sel, Action::Save)),
             _ => None,
         }
+    }
+
+    /// Noctalia's image placement: centred below the toolbar at 1:1 device pixels, scaled down
+    /// only when it doesn't fit.
+    fn layout_editor(&mut self, i: usize) {
+        let s = &self.surfs[i];
+        let Some(e) = self.editor.as_mut() else { return };
+        let (w, h) = (f64::from(s.size.0), f64::from(s.size.1));
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let device = f64::from(s.phys.0) / w;
+        let top = f64::from(SPACE_MD + CONTROL_SM + SPACE_SM * 2.0 + SPACE_LG);
+        let (avail_w, avail_h) = ((w - 2.0 * f64::from(SPACE_LG)).max(1.0), (h - top - f64::from(SPACE_LG)).max(1.0));
+        let (iw, ih) = (f64::from(e.image.width), f64::from(e.image.height));
+        let fit = device.max(iw / avail_w).max(ih / avail_h).max(0.1);
+        let (dw, dh) = (iw / fit, ih / fit);
+        // Snap the origin to device pixels so a 1:1 image isn't resampled.
+        let snap = |v: f64| (v * device).round() / device;
+        e.canvas = Rect { x: snap((w - dw) / 2.0), y: snap(top + (avail_h - dh) / 2.0), w: dw, h: dh };
+        e.fit = fit;
+    }
+
+    fn annotated(&self, action: Action) -> Outcome {
+        Outcome::Annotated(self.annotations.clone(), action)
     }
 
     /// Image size the current selection would produce, for the size badge.
@@ -411,6 +554,13 @@ impl Overlay {
             (_, Some(sel)) => Some(self.selection_pixels(sel)),
         };
         let picker_outputs: Vec<(u32, String)> = self.surfs.iter().map(|s| (s.meta.id, picker_label(&s.meta))).collect();
+        let drawing = match (self.drag, self.pointer.and_then(|p| self.to_image(p))) {
+            (Drag::Draw { anchor }, Some(ip)) => Some(Rect::from_points(anchor, self.clamp_image(ip))),
+            _ => None,
+        };
+        if self.mode == Mode::Annotate {
+            self.layout_editor(i);
+        }
         let hovered_output = self.pointer.and_then(|p| self.surfs.iter().find(|s| s.meta.logical.contains(p)).map(|s| s.meta.id));
 
         let s = &mut self.surfs[i];
@@ -483,10 +633,37 @@ impl Overlay {
                     path.rect(BORDER_WIDTH / 2.0, BORDER_WIDTH / 2.0, w - BORDER_WIDTH, h - BORDER_WIDTH);
                     canvas.stroke_path(&path, &Paint::color(t.primary.fv()).with_line_width(BORDER_WIDTH));
                 }
-                s.buttons = match font {
+                (s.buttons, s.toolbar) = match font {
                     Some(font) => draw_picker(canvas, font, t, &picker_outputs, self.hover_button, w),
-                    None => Vec::new(),
+                    None => (Vec::new(), None),
                 };
+            }
+            Mode::Annotate => {
+                fill_rect(canvas, 0.0, 0.0, w, h, Paint::color(t.surface.with_alpha(SURROUND_ALPHA).fv()));
+                if let Some(e) = &self.editor {
+                    let c = e.canvas;
+                    let (cx, cy, cw, ch) = (c.x as f32, c.y as f32, c.w as f32, c.h as f32);
+                    if let Some(tex) = s.texture {
+                        fill_rect(canvas, cx, cy, cw, ch, Paint::image(tex, cx, cy, cw, ch, 0.0, 1.0));
+                    }
+                    // Strokes are clipped to the image, as they are when burned in.
+                    canvas.save();
+                    canvas.scissor(cx, cy, cw, ch);
+                    let preview = drawing.map(|rect| Annotation { rect, width: annotate::DEFAULT_WIDTH * e.scale, color: annotate::DEFAULT_COLOR });
+                    for shape in self.annotations.iter().copied().chain(preview) {
+                        let r = shape.rect;
+                        let fit = e.fit as f32;
+                        let mut path = Path::new();
+                        path.rect(cx + r.x as f32 / fit, cy + r.y as f32 / fit, r.w as f32 / fit, r.h as f32 / fit);
+                        canvas.stroke_path(&path, &Paint::color(shape.color.fv()).with_line_width(shape.width as f32 / fit));
+                    }
+                    canvas.restore();
+                    // Inset outline separating the image from the surround; never exported.
+                    let mut path = Path::new();
+                    path.rect(cx + 0.5, cy + 0.5, cw - 1.0, ch - 1.0);
+                    canvas.stroke_path(&path, &Paint::color(t.outline.fv()).with_line_width(1.0));
+                }
+                (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, self.hover_button, w);
             }
         }
 
@@ -585,7 +762,7 @@ fn draw_hint(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, text
 }
 
 /// "Choose display" bar with one button per output. Returns the buttons' hit boxes.
-fn draw_picker(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, outputs: &[(u32, String)], hover: Option<u32>, w: f32) -> Vec<(Rect, u32)> {
+fn draw_picker(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, outputs: &[(u32, String)], hover: Option<Hit>, w: f32) -> (Vec<(Rect, Hit)>, Option<Rect>) {
     let label = "Choose display";
     let label_paint = text_paint(font, CAPTION_FONT, t.on_surface);
     let label_w = text_width(canvas, label, &label_paint);
@@ -601,13 +778,111 @@ fn draw_picker(canvas: &mut Canvas<OpenGl>, font: femtovg::FontId, t: &Theme, ou
     let mut buttons = Vec::new();
     let mut x = x0 + SPACE_MD + label_w + SPACE_SM;
     for ((id, name), bw) in outputs.iter().zip(widths) {
-        let hovered = hover == Some(*id);
+        let hovered = hover == Some(Hit::Output(*id));
         let (fill, border, text) = if hovered { (t.primary, t.primary, t.on_primary) } else { (t.surface_variant, t.outline, t.on_surface) };
         let r = (x, y0 + SPACE_SM, bw, btn_h);
         card(canvas, r, RADIUS_MD, fill, border);
         let _ = canvas.fill_text(x + SPACE_MD, r.1 + btn_h / 2.0, name, &text_paint(font, CAPTION_FONT, text));
-        buttons.push((Rect { x: f64::from(r.0), y: f64::from(r.1), w: f64::from(r.2), h: f64::from(r.3) }, *id));
+        buttons.push((to_rect(r), Hit::Output(*id)));
         x += bw + SPACE_SM;
     }
-    buttons
+    (buttons, Some(to_rect((x0, y0, card_w, card_h))))
+}
+
+fn to_rect(r: (f32, f32, f32, f32)) -> Rect {
+    Rect { x: f64::from(r.0), y: f64::from(r.1), w: f64::from(r.2), h: f64::from(r.3) }
+}
+
+enum Item {
+    Button(Hit),
+    Separator,
+}
+
+/// Noctalia's annotation toolbar: a rounded card centred at the top of each output.
+fn draw_annotate_toolbar(canvas: &mut Canvas<OpenGl>, t: &Theme, hover: Option<Hit>, w: f32) -> (Vec<(Rect, Hit)>, Option<Rect>) {
+    use Item::*;
+    let items = [Button(Hit::RectangleTool), Separator, Button(Hit::Copy), Button(Hit::Save), Button(Hit::Done), Button(Hit::Close)];
+    let item_w = |item: &Item| match item {
+        Button(_) => CONTROL_SM,
+        Separator => 1.0,
+    };
+    let content_w: f32 = items.iter().map(item_w).sum::<f32>() + SPACE_SM * (items.len() - 1) as f32;
+    let (card_w, card_h) = (content_w + SPACE_MD * 2.0, CONTROL_SM + SPACE_SM * 2.0);
+    let x0 = ((w - card_w) / 2.0).round();
+    let y0 = SPACE_MD;
+    card(canvas, (x0, y0, card_w, card_h), RADIUS_XL, t.surface.with_alpha(TOOLBAR_FILL_ALPHA), t.outline);
+
+    let mut buttons = Vec::new();
+    let mut x = x0 + SPACE_MD;
+    let y = y0 + SPACE_SM;
+    for item in &items {
+        match *item {
+            Separator => {
+                let h = CONTROL_SM * 0.6;
+                fill_rect(canvas, x, y + (CONTROL_SM - h) / 2.0, 1.0, h, Paint::color(t.outline.fv()));
+            }
+            Button(hit) => {
+                // The only tool is always selected; Done is the primary action.
+                let (fill, fg) = match (hit, hover == Some(hit)) {
+                    (Hit::RectangleTool, _) => (Some(t.primary), t.on_primary),
+                    (_, true) => (Some(t.hover), t.on_hover),
+                    (Hit::Done, false) => (Some(t.primary), t.on_primary),
+                    _ => (None, t.on_surface),
+                };
+                if let Some(fill) = fill {
+                    let mut path = Path::new();
+                    path.rounded_rect(x, y, CONTROL_SM, CONTROL_SM, RADIUS_MD);
+                    canvas.fill_path(&path, &Paint::color(fill.fv()));
+                }
+                let pad = (CONTROL_SM - ICON) / 2.0;
+                draw_icon(canvas, hit, x + pad, y + pad, fg);
+                buttons.push((to_rect((x, y, CONTROL_SM, CONTROL_SM)), hit));
+            }
+        }
+        x += item_w(item) + SPACE_SM;
+    }
+    (buttons, Some(to_rect((x0, y0, card_w, card_h))))
+}
+
+/// Line icons in a 16×16 box, after the Tabler glyphs Noctalia uses.
+fn draw_icon(canvas: &mut Canvas<OpenGl>, hit: Hit, x: f32, y: f32, color: Color) {
+    let mut path = Path::new();
+    match hit {
+        Hit::RectangleTool => path.rounded_rect(x + 2.0, y + 2.0, 12.0, 12.0, 2.0),
+        Hit::Copy => {
+            path.rounded_rect(x + 5.5, y + 5.5, 9.0, 9.0, 1.5);
+            path.move_to(x + 10.5, y + 5.5);
+            path.line_to(x + 10.5, y + 2.5);
+            path.line_to(x + 1.5, y + 2.5);
+            path.line_to(x + 1.5, y + 11.5);
+            path.line_to(x + 5.5, y + 11.5);
+        }
+        Hit::Save => {
+            path.move_to(x + 2.0, y + 2.0);
+            path.line_to(x + 11.5, y + 2.0);
+            path.line_to(x + 14.0, y + 4.5);
+            path.line_to(x + 14.0, y + 14.0);
+            path.line_to(x + 2.0, y + 14.0);
+            path.close();
+            path.rect(x + 5.0, y + 2.0, 5.0, 3.5);
+            path.circle(x + 8.0, y + 10.0, 1.75);
+        }
+        Hit::Done => {
+            path.move_to(x + 3.0, y + 8.5);
+            path.line_to(x + 6.5, y + 12.0);
+            path.line_to(x + 13.0, y + 4.5);
+        }
+        Hit::Close => {
+            path.move_to(x + 4.0, y + 4.0);
+            path.line_to(x + 12.0, y + 12.0);
+            path.move_to(x + 12.0, y + 4.0);
+            path.line_to(x + 4.0, y + 12.0);
+        }
+        Hit::Output(_) => return,
+    }
+    let paint = Paint::color(color.fv())
+        .with_line_width(1.75)
+        .with_line_cap(femtovg::LineCap::Round)
+        .with_line_join(femtovg::LineJoin::Round);
+    canvas.stroke_path(&path, &paint);
 }

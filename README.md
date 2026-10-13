@@ -15,6 +15,9 @@ shot-snap fullscreen pick        # choose a monitor (immediate on single-monitor
 shot-snap fullscreen DP-2        # one output: connector name, or a word from its description
 shot-snap fullscreen all         # every monitor in one image
 shot-snap quit                   # stop the daemon
+
+shot-snap region --annotate      # -a / --annotate: edit the capture before it's saved or copied
+shot-snap fullscreen DP-2 -a
 ```
 
 The first command starts a small background daemon (`shot-snap daemon`) that stays resident, so
@@ -35,12 +38,29 @@ The client prints the saved path (if any) and exits `0` done, `1` error, `2` can
 While confirming, drag the edges or corners to resize, drag inside to move, or drag outside to
 start again.
 
+### Annotation
+
+Add `--annotate` (or `-a`) to `region` or `fullscreen` to open the editor on the captured image
+before it's delivered. The editor appears on the monitor the capture came from, with
+the image centred under a toolbar at the top (1:1, scaled down if it doesn't fit). Drag on the image
+to draw a rectangle. Copy, Save and Done (✓) export the capture with the rectangles burned in, and
+the editor closes.
+
+| Key | Action |
+|---|---|
+| Esc / ✕ | Close without saving |
+| Enter / ✓ | Done: use the configured outputs |
+| Ctrl+C | Copy to clipboard |
+| Ctrl+S | Save to file |
+| Ctrl+Z | Undo the last rectangle |
+
 ### Hyprland example
 
 ```ini
 bind = , Print, exec, shot-snap region
 bind = SHIFT, Print, exec, shot-snap fullscreen
 bind = CTRL, Print, exec, shot-snap fullscreen pick
+bind = ALT, Print, exec, shot-snap region --annotate
 ```
 
 ## Configuration
@@ -65,6 +85,8 @@ surface         = "#070722"
 on_surface      = "#f3edf7"
 surface_variant = "#11112d"
 outline         = "#21215f"
+hover           = "#9bfece"
+on_hover        = "#0e0e43"
 dim_opacity     = 0.65
 font            = "sans-serif:bold"   # fontconfig pattern
 ```

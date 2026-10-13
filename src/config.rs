@@ -49,6 +49,8 @@ pub struct Theme {
     pub on_surface: Color,
     pub surface_variant: Color,
     pub outline: Color,
+    pub hover: Color,
+    pub on_hover: Color,
     pub dim_opacity: f32,
     /// fontconfig pattern, resolved with `fc-match`.
     pub font: String,
@@ -63,6 +65,8 @@ impl Default for Theme {
             on_surface: Color::hex("#f3edf7"),
             surface_variant: Color::hex("#11112d"),
             outline: Color::hex("#21215f"),
+            hover: Color::hex("#9bfece"),
+            on_hover: Color::hex("#0e0e43"),
             dim_opacity: 0.65,
             font: "sans-serif:bold".into(),
         }

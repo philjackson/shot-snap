@@ -27,6 +27,7 @@ use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
+use crate::annotate;
 use crate::capture::{Batch, NoEvents, OutputMeta};
 use crate::clipboard::Clipboard;
 use crate::config::{self, Config};
@@ -56,12 +57,16 @@ enum Stage {
     Hiding(Area, Action),
     /// Capturing for the final image (no freeze, or a direct fullscreen request).
     Final(Area, Action),
+    /// The annotation editor is open on the captured image.
+    Editing,
     Delivering,
 }
 
 struct Job {
     reply: Option<UnixStream>,
     stage: Stage,
+    /// Open the editor on the captured image before delivering it.
+    annotate: bool,
 }
 
 pub struct App {
@@ -206,7 +211,8 @@ impl App {
                     return reply(&mut stream, Response::Error(format!("config error: {e}")));
                 }
                 self.config = config;
-                self.job = Some(Job { reply: Some(stream), stage: Stage::Delivering });
+                let annotate = matches!(request, Request::Region { annotate: true } | Request::Fullscreen { annotate: true, .. });
+                self.job = Some(Job { reply: Some(stream), stage: Stage::Delivering, annotate });
                 if let Err(e) = self.start(request) {
                     self.finish(Response::Error(format!("{e:#}")));
                 }
@@ -218,7 +224,8 @@ impl App {
         if self.screencopy.is_none() {
             bail!("Screen capture is not available on this compositor");
         }
-        if Plan::new(&self.config, Action::Default).is_empty() {
+        // The editor has its own Copy and Save, so it can start with no default output.
+        if !self.annotating() && Plan::new(&self.config, Action::Default).is_empty() {
             bail!("No screenshot output enabled");
         }
         let outputs = self.output_metas();
@@ -226,9 +233,9 @@ impl App {
             bail!("No outputs available");
         }
         match request {
-            Request::Region => self.begin_overlay(overlay::Mode::Region),
-            Request::Fullscreen(FullscreenTarget::Pick) if outputs.len() > 1 => self.begin_overlay(overlay::Mode::Picker),
-            Request::Fullscreen(FullscreenTarget::Focused | FullscreenTarget::Pick) => {
+            Request::Region { .. } => self.begin_overlay(overlay::Mode::Region),
+            Request::Fullscreen { target: FullscreenTarget::Pick, .. } if outputs.len() > 1 => self.begin_overlay(overlay::Mode::Picker),
+            Request::Fullscreen { target: FullscreenTarget::Focused | FullscreenTarget::Pick, .. } => {
                 let focused = crate::focused::focused_output_name();
                 let output = focused
                     .and_then(|name| outputs.iter().find(|o| o.name == name))
@@ -236,7 +243,7 @@ impl App {
                 self.capture_final(Area::Output(output.id), Action::Default, vec![output.clone()]);
                 Ok(())
             }
-            Request::Fullscreen(FullscreenTarget::Named(selector)) => {
+            Request::Fullscreen { target: FullscreenTarget::Named(selector), .. } => {
                 let output = find_output(&outputs, &selector).ok_or_else(|| {
                     let names: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
                     anyhow::anyhow!("unknown output {selector:?}; available: {}", names.join(", "))
@@ -244,7 +251,7 @@ impl App {
                 self.capture_final(Area::Output(output.id), Action::Default, vec![output.clone()]);
                 Ok(())
             }
-            Request::Fullscreen(FullscreenTarget::All) => {
+            Request::Fullscreen { target: FullscreenTarget::All, .. } => {
                 self.capture_final(Area::All, Action::Default, outputs);
                 Ok(())
             }
@@ -289,6 +296,19 @@ impl App {
             Outcome::Cancel => return self.finish(Response::Cancelled),
             Outcome::Region(rect, action) => (Area::Rect(rect), action),
             Outcome::Picked(id) => (Area::Output(id), Action::Default),
+            Outcome::Annotated(shapes, action) => {
+                let image = overlay.take_image();
+                self.overlay = None;
+                let _ = self.conn.flush();
+                return match image {
+                    Some(mut image) => {
+                        let whole = Rect { x: 0.0, y: 0.0, w: f64::from(image.width), h: f64::from(image.height) };
+                        annotate::burn(&mut image, whole, &shapes);
+                        self.deliver(image, action)
+                    }
+                    None => self.finish(Response::Error("annotation editor lost its image".into())),
+                };
+            }
         };
         if !frozen.is_empty() {
             self.overlay = None;
@@ -355,21 +375,50 @@ impl App {
     fn compose_and_deliver(&mut self, area: Area, action: Action, frames: &[OutputFrame]) {
         let metas = self.output_metas();
         let image = match area {
-            Area::Rect(r) => compose(r, frames),
+            Area::Rect(r) => compose(r, frames).map(|img| (r, img)),
             Area::Output(id) => {
                 let logical = metas.iter().find(|o| o.id == id).map(|o| o.logical);
-                frames.iter().find(|f| Some(f.logical) == logical).or(frames.first()).map(|f| f.image.clone())
+                frames.iter().find(|f| Some(f.logical) == logical).or(frames.first()).map(|f| (f.logical, f.image.clone()))
             }
-            Area::All => frames.iter().map(|f| f.logical).reduce(|a, b| a.union(&b)).and_then(|r| compose(r, frames)),
+            Area::All => frames.iter().map(|f| f.logical).reduce(|a, b| a.union(&b)).and_then(|r| compose(r, frames).map(|img| (r, img))),
         };
         match image {
-            Some(image) => self.deliver(image, action),
+            Some((shown, image)) if self.annotating() => self.open_editor(area, shown, image),
+            Some((_, image)) => self.deliver(image, action),
             None => self.finish(Response::Error("selection is outside every output".into())),
         }
     }
 
+    fn annotating(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.annotate)
+    }
+
+    /// Shows the capture in the editor on the output it came from (the one holding the middle of
+    /// a region), or the focused output for a multi-output capture.
+    fn open_editor(&mut self, area: Area, shown: Rect, image: Image) {
+        let outputs = self.output_metas();
+        let centre = (shown.x + shown.w / 2.0, shown.y + shown.h / 2.0);
+        let target = match area {
+            Area::Output(id) => outputs.iter().find(|o| o.id == id),
+            Area::Rect(_) => outputs.iter().find(|o| o.logical.contains(centre)),
+            Area::All => crate::focused::focused_output_name().and_then(|name| outputs.iter().find(|o| o.name == name)),
+        }
+        .or(outputs.first())
+        .cloned();
+        let Some(target) = target else { return self.finish(Response::Error("No outputs available".into())) };
+        let scale = f64::from(image.width) / shown.w;
+        self.overlay = None;
+        let init = overlay::Init { compositor: &self.compositor, layer_shell: &self.layer_shell, viewporter: &self.viewporter, qh: &self.qh };
+        self.overlay = Some(Overlay::new_editor(init, target, image, scale, self.config.theme.clone()));
+        self.cursor_shape = None;
+        self.set_stage(Stage::Editing);
+    }
+
     fn deliver(&mut self, image: Image, action: Action) {
         let plan = Plan::new(&self.config, action);
+        if plan.is_empty() {
+            return self.finish(Response::Error("No screenshot output enabled".into()));
+        }
         if plan.copy && !self.clipboard.available() && !plan.save && !plan.pipe {
             return self.finish(Response::Error("clipboard unavailable: compositor has no data-control protocol".into()));
         }
@@ -565,9 +614,9 @@ impl KeyboardHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
 
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+    fn press_key(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
         let Some(overlay) = &mut self.overlay else { return };
-        if let Some(outcome) = overlay.key(event.keysym, self.modifiers) {
+        if let Some(outcome) = overlay.key(event.keysym, self.modifiers, qh) {
             self.overlay_outcome(outcome);
         }
     }

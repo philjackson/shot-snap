@@ -1,3 +1,4 @@
+mod annotate;
 mod app;
 mod capture;
 mod clipboard;
@@ -25,6 +26,9 @@ USAGE:
     shot-snap fullscreen all           One image of every monitor
     shot-snap daemon                   Run the daemon in the foreground (started automatically otherwise)
     shot-snap quit                     Stop the daemon
+
+OPTIONS (region and fullscreen):
+    -a, --annotate                     Open the editor on the capture before saving or copying
 
 Prints the saved file path, if any. Exit status: 0 done, 1 error, 2 cancelled.
 Config: ~/.config/shot-snap/config.toml";

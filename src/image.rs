@@ -273,7 +273,7 @@ mod tests {
     }
 
     fn reds(img: &Image) -> Vec<u8> {
-        img.data.chunks_exact(4).map(|p| p[0]).collect()
+        img.data.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
     }
 
     #[test]
