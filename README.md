@@ -34,6 +34,10 @@ workspaces currently shown can be picked.
 The first command starts a small background daemon (`shot-snap daemon`) that stays resident, so
 later captures are instant and the clipboard keeps serving the image after the overlay closes.
 Run `shot-snap daemon` yourself (e.g. `exec-once`) to start it early or to see its logs.
+After rebuilding, `shot-snap --restart-daemon` swaps the running daemon for the new binary. It works
+on its own or in front of any command (`shot-snap --restart-daemon region -a`). To run a second,
+separate daemon (e.g. for testing next to your own), point both it and its clients at another socket
+with `SHOTSNAP_SOCKET=/path/to.sock`.
 
 The client prints the saved path (if any) and exits `0` done, `1` error, `2` cancelled.
 

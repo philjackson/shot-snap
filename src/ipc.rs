@@ -97,6 +97,10 @@ impl Response {
 }
 
 pub fn socket_path() -> PathBuf {
+    // An explicit socket, e.g. to run a second daemon for testing alongside your own.
+    if let Some(path) = std::env::var_os("SHOTSNAP_SOCKET").filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
     // Use only the socket's file name so absolute WAYLAND_DISPLAY paths still give a sane name.
@@ -106,6 +110,27 @@ pub fn socket_path() -> PathBuf {
 
 fn connect() -> std::io::Result<UnixStream> {
     UnixStream::connect(socket_path())
+}
+
+/// Stops the running daemon (if any), waits for it to go, and starts a fresh one from this
+/// binary, so a rebuilt shot-snap takes effect without a manual `quit`.
+pub fn restart_daemon() -> anyhow::Result<()> {
+    if connect().is_ok() {
+        match send(&Request::Quit)? {
+            Response::Done(_) => {}
+            other => bail!("daemon didn't quit: {other:?}"),
+        }
+        // It removes its socket on the way out; wait until nothing answers any more.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while connect().is_ok() {
+            if Instant::now() >= deadline {
+                bail!("the old daemon is still running");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    drop(spawn_daemon_and_connect()?);
+    Ok(())
 }
 
 /// Sends a request, starting the daemon first if nothing is listening.

@@ -42,6 +42,9 @@ USAGE:
 OPTIONS (region, fullscreen and window):
     -a, --annotate                     Open the editor on the capture before saving or copying
 
+    --restart-daemon                   Restart the daemon first (e.g. after rebuilding); works
+                                       alone or with any command
+
 Prints the saved file path, if any. Exit status: 0 done, 1 error, 2 cancelled.
 Config: ~/.config/shot-snap/config.toml";
 
@@ -64,6 +67,18 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
+            // --restart-daemon can go anywhere, alone or with a command.
+            let restart = args.contains(&"--restart-daemon");
+            let args: Vec<&str> = args.into_iter().filter(|a| *a != "--restart-daemon").collect();
+            if restart {
+                if let Err(e) = ipc::restart_daemon() {
+                    eprintln!("shot-snap: restarting the daemon: {e:#}");
+                    return ExitCode::FAILURE;
+                }
+                if args.is_empty() {
+                    return ExitCode::SUCCESS;
+                }
+            }
             let request = match Request::parse(&args) {
                 Ok(r) => r,
                 Err(e) => {
