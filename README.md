@@ -14,11 +14,18 @@ shot-snap fullscreen             # focused monitor
 shot-snap fullscreen pick        # choose a monitor (immediate on single-monitor setups)
 shot-snap fullscreen DP-2        # one output: connector name, or a word from its description
 shot-snap fullscreen all         # every monitor in one image
+shot-snap window                 # the focused window
+shot-snap window pick            # hover to highlight a window, click to capture it
 shot-snap quit                   # stop the daemon
 
 shot-snap region --annotate      # -a / --annotate: edit the capture before it's saved or copied
 shot-snap fullscreen DP-2 -a
+shot-snap window pick -a
 ```
+
+Window capture asks the compositor where windows are (Hyprland, Sway and Niri are supported) and
+captures that area of the screen, so anything overlapping the window is included, as in Noctalia's
+old window mode. Only windows on the workspaces currently shown can be picked.
 
 The first command starts a small background daemon (`shot-snap daemon`) that stays resident, so
 later captures are instant and the clipboard keeps serving the image after the overlay closes.
@@ -117,6 +124,7 @@ bind = , Print, exec, shot-snap region
 bind = SHIFT, Print, exec, shot-snap fullscreen
 bind = CTRL, Print, exec, shot-snap fullscreen pick
 bind = ALT, Print, exec, shot-snap region --annotate
+bind = SUPER, Print, exec, shot-snap window pick
 ```
 
 ## Configuration

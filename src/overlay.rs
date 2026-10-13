@@ -31,6 +31,7 @@ use crate::picker::{self, Picker, Target};
 use crate::render::{self, Map};
 use crate::style::{self, Style};
 use crate::style_panel::{self, StylePanel};
+use crate::windows::{self, Window};
 use crate::state::AnnotateState;
 use crate::ui::{card, fill_rect, text_paint, text_width};
 
@@ -60,6 +61,8 @@ pub enum Mode {
     Picker,
     /// Editing one captured image, shown on a single output under the toolbar.
     Annotate,
+    /// Hover a window to highlight it, click to capture it.
+    WindowPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +212,9 @@ pub struct Overlay {
     menu: Option<Tool>,
     /// Index of the text annotation being typed.
     editing: Option<usize>,
+    /// Window picker: windows on screen (topmost first) and the one under the pointer.
+    windows: Vec<Window>,
+    hover_window: Option<usize>,
     theme: Theme,
     hidden: bool,
 }
@@ -270,6 +276,8 @@ impl Overlay {
             long_press: None,
             menu: None,
             editing: None,
+            windows: Vec::new(),
+            hover_window: None,
             theme,
             hidden: false,
         }
@@ -287,6 +295,11 @@ impl Overlay {
     /// The colour panel's state to persist, with the current pick recorded.
     pub fn take_annotate_state(&mut self) -> Option<AnnotateState> {
         self.picker.take().map(Picker::finish)
+    }
+
+    /// The windows the window picker offers, topmost first.
+    pub fn set_windows(&mut self, windows: Vec<Window>) {
+        self.windows = windows;
     }
 
     /// Timers to schedule, as (delay, what to report back through `timer`).
@@ -575,6 +588,8 @@ impl Overlay {
     pub fn cursor(&self) -> Shape {
         match (self.mode, self.drag) {
             (Mode::Picker, _) if self.hover_button.is_some() => Shape::Pointer,
+            (Mode::WindowPicker, _) if self.hover_window.is_some() => Shape::Pointer,
+            (Mode::WindowPicker, _) => Shape::Default,
             (Mode::Picker, _) => Shape::Default,
             (Mode::Annotate, _) if self.picker.as_ref().is_some_and(|p| p.dragging()) => Shape::Default,
             (Mode::Annotate, Drag::None) if self.hover_button.is_some() => Shape::Pointer,
@@ -640,6 +655,9 @@ impl Overlay {
             }
             self.redraw_all(qh);
             return;
+        }
+        if self.mode == Mode::WindowPicker {
+            self.hover_window = windows::at(&self.windows, p);
         }
         match self.drag {
             Drag::Select { anchor } => self.selection = Some(Rect::from_points(anchor, self.clamp_point(p))),
@@ -722,6 +740,12 @@ impl Overlay {
                 return Some(Outcome::Picked(id));
             }
             (Mode::Picker, false) => None,
+            (Mode::WindowPicker, true) => {
+                // Only the part on screen can be captured.
+                let rect = self.hover_window.and_then(|i| self.windows[i].rect.intersect(&self.desktop))?;
+                return Some(Outcome::Region(rect.rounded(), Action::Default));
+            }
+            (Mode::WindowPicker, false) => None,
             (Mode::Annotate, true) if self.press_picker(p) => None,
             (Mode::Annotate, true) if self.press_style_panel(p) => None,
             (Mode::Annotate, true) if self.menu.is_some() => {
@@ -1216,6 +1240,41 @@ impl Overlay {
                         let hint = "Ctrl+C to copy · Ctrl+S to save · Enter or Space for defaults · Esc to cancel · Drag to reselect";
                         draw_hint(canvas, font, t, hint, w);
                     }
+            }
+            Mode::WindowPicker => {
+                let dim = Paint::color(femtovg::Color::rgbaf(0.0, 0.0, 0.0, t.dim_opacity));
+                match self.hover_window.map(|i| local(self.windows[i].rect)) {
+                    Some(win) => {
+                        // Same four-strip dim as region selection: the window stays untinted.
+                        let (x0, y0, x1, y1) = (win.x as f32, win.y as f32, win.right() as f32, win.bottom() as f32);
+                        let (sy0, sy1) = (y0.clamp(0.0, h), y1.clamp(0.0, h));
+                        fill_rect(canvas, 0.0, 0.0, w, sy0, dim.clone());
+                        fill_rect(canvas, 0.0, sy1, w, h - sy1, dim.clone());
+                        fill_rect(canvas, 0.0, sy0, x0.clamp(0.0, w), sy1 - sy0, dim.clone());
+                        fill_rect(canvas, x1.clamp(0.0, w), sy0, w - x1.clamp(0.0, w), sy1 - sy0, dim);
+                    }
+                    None => fill_rect(canvas, 0.0, 0.0, w, h, dim),
+                }
+                // Every window gets a faint outline; the hovered one the selection border.
+                for (i, win) in self.windows.iter().enumerate() {
+                    let r = local(win.rect);
+                    let hovered = self.hover_window == Some(i);
+                    let (color, width) = if hovered { (t.primary, BORDER_WIDTH) } else { (t.on_surface.with_alpha(0.25), 1.0) };
+                    let mut path = Path::new();
+                    path.rect(r.x as f32 + width / 2.0, r.y as f32 + width / 2.0, r.w as f32 - width, r.h as f32 - width);
+                    canvas.stroke_path(&path, &Paint::color(color.fv()).with_line_width(width));
+                }
+                if let Some(font) = font {
+                    if let Some(i) = self.hover_window {
+                        let win = &self.windows[i];
+                        let r = local(win.rect);
+                        let title: String = if win.title.chars().count() > 60 { win.title.chars().take(59).chain(['…']).collect() } else { win.title.clone() };
+                        let label = if title.is_empty() { "Window".to_owned() } else { title };
+                        let (px, py) = ((r.x as f32 + 8.0).max(4.0), (r.y as f32 + 8.0).max(4.0));
+                        draw_badge(canvas, font, t, &label, (px - BADGE_OFFSET.0, py - BADGE_OFFSET.1), (w, h));
+                    }
+                    draw_hint(canvas, font, t, "Click a window to capture it · Esc to cancel", w);
+                }
             }
             Mode::Picker => {
                 let lit = hovered_output == Some(s.meta.id);

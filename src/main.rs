@@ -16,6 +16,7 @@ mod render;
 mod state;
 mod style;
 mod style_panel;
+mod windows;
 mod ui;
 
 use std::process::ExitCode;
@@ -31,10 +32,12 @@ USAGE:
     shot-snap fullscreen pick          Choose a monitor (multi-monitor setups)
     shot-snap fullscreen <OUTPUT>      Capture one output (connector name, or a word from its description)
     shot-snap fullscreen all           One image of every monitor
+    shot-snap window                   Capture the focused window
+    shot-snap window pick              Click a window to capture it
     shot-snap daemon                   Run the daemon in the foreground (started automatically otherwise)
     shot-snap quit                     Stop the daemon
 
-OPTIONS (region and fullscreen):
+OPTIONS (region, fullscreen and window):
     -a, --annotate                     Open the editor on the capture before saving or copying
 
 Prints the saved file path, if any. Exit status: 0 done, 1 error, 2 cancelled.

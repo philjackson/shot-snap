@@ -21,6 +21,8 @@ pub enum Request {
     /// `annotate`: open the editor on the captured image before delivering it.
     Region { annotate: bool },
     Fullscreen { target: FullscreenTarget, annotate: bool },
+    /// The focused window, or (`pick`) one chosen by clicking.
+    Window { pick: bool, annotate: bool },
     Ping,
     Quit,
 }
@@ -39,6 +41,7 @@ impl Request {
                 };
                 format!("fullscreen{target}{}", flag(*annotate))
             }
+            Request::Window { pick, annotate } => format!("window{}{}", if *pick { " pick" } else { "" }, flag(*annotate)),
             Request::Ping => "ping".into(),
             Request::Quit => "quit".into(),
         }
@@ -54,6 +57,8 @@ impl Request {
             ["fullscreen", "pick"] => fullscreen(FullscreenTarget::Pick),
             ["fullscreen", "all" | "*"] => fullscreen(FullscreenTarget::All),
             ["fullscreen", name] if !name.starts_with('-') => fullscreen(FullscreenTarget::Named((*name).to_owned())),
+            ["window"] => Request::Window { pick: false, annotate },
+            ["window", "pick"] => Request::Window { pick: true, annotate },
             ["ping"] if !annotate => Request::Ping,
             ["quit"] if !annotate => Request::Quit,
             _ => bail!("unknown command: {}", args.join(" ")),
@@ -149,7 +154,7 @@ mod tests {
 
     #[test]
     fn annotate_flag_round_trips() {
-        for args in [&["region"][..], &["region", "--annotate"], &["fullscreen", "-a"], &["fullscreen", "DP-1", "--annotate"], &["fullscreen", "--annotate", "pick"], &["fullscreen", "all"]] {
+        for args in [&["region"][..], &["region", "--annotate"], &["fullscreen", "-a"], &["fullscreen", "DP-1", "--annotate"], &["fullscreen", "--annotate", "pick"], &["fullscreen", "all"], &["window"], &["window", "pick", "-a"]] {
             let req = Request::parse(args).unwrap();
             let encoded = req.encode();
             let reparsed = Request::parse(&encoded.split_whitespace().collect::<Vec<_>>()).unwrap();
@@ -160,6 +165,8 @@ mod tests {
             Request::parse(&["fullscreen", "--annotate", "pick"]).unwrap(),
             Request::Fullscreen { target: FullscreenTarget::Pick, annotate: true }
         );
+        assert_eq!(Request::parse(&["window", "-a", "pick"]).unwrap(), Request::Window { pick: true, annotate: true });
+        assert!(Request::parse(&["window", "DP-1"]).is_err());
         assert!(Request::parse(&["annotate"]).is_err());
         assert!(Request::parse(&["quit", "--annotate"]).is_err());
     }

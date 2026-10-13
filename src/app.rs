@@ -96,6 +96,8 @@ pub struct App {
     pub capture: Option<Batch>,
     batch_counter: u64,
     overlay: Option<Overlay>,
+    /// Windows found for a window-pick request, handed to its overlay when it opens.
+    pending_windows: Vec<crate::windows::Window>,
     delivered: Sender<anyhow::Result<Delivered>>,
     exit: bool,
 }
@@ -169,6 +171,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
         capture: None,
         batch_counter: 0,
         overlay: None,
+        pending_windows: Vec::new(),
         delivered,
         exit: false,
     };
@@ -211,7 +214,7 @@ impl App {
                     return reply(&mut stream, Response::Error(format!("config error: {e}")));
                 }
                 self.config = config;
-                let annotate = matches!(request, Request::Region { annotate: true } | Request::Fullscreen { annotate: true, .. });
+                let annotate = matches!(request, Request::Region { annotate: true } | Request::Fullscreen { annotate: true, .. } | Request::Window { annotate: true, .. });
                 self.job = Some(Job { reply: Some(stream), stage: Stage::Delivering, annotate });
                 if let Err(e) = self.start(request) {
                     self.finish(Response::Error(format!("{e:#}")));
@@ -251,6 +254,23 @@ impl App {
                 self.capture_final(Area::Output(output.id), Action::Default, vec![output.clone()]);
                 Ok(())
             }
+            Request::Window { pick: false, .. } => {
+                let windows = crate::windows::visible_windows(&outputs)?;
+                let window = windows.iter().find(|w| w.focused).ok_or_else(|| anyhow::anyhow!("no focused window"))?;
+                let desktop = outputs.iter().map(|o| o.logical).reduce(|a, b| a.union(&b)).unwrap_or_default();
+                let rect = window.rect.intersect(&desktop).ok_or_else(|| anyhow::anyhow!("the focused window is off screen"))?.rounded();
+                let on: Vec<OutputMeta> = outputs.into_iter().filter(|o| o.logical.intersect(&rect).is_some()).collect();
+                self.capture_final(Area::Rect(rect), Action::Default, on);
+                Ok(())
+            }
+            Request::Window { pick: true, .. } => {
+                let windows = crate::windows::visible_windows(&outputs)?;
+                if windows.is_empty() {
+                    bail!("no windows on screen");
+                }
+                self.pending_windows = windows;
+                self.begin_overlay(overlay::Mode::WindowPicker)
+            }
             Request::Fullscreen { target: FullscreenTarget::All, .. } => {
                 self.capture_final(Area::All, Action::Default, outputs);
                 Ok(())
@@ -280,7 +300,9 @@ impl App {
         let preselect = if remember { state::last_region() } else { None };
         let init = overlay::Init { compositor: &self.compositor, layer_shell: &self.layer_shell, viewporter: &self.viewporter, qh: &self.qh };
         let confirm = self.config.confirm_region || self.config.remember_last_region;
-        self.overlay = Some(Overlay::new(init, mode, outputs, frozen, self.config.theme.clone(), confirm, preselect));
+        let mut overlay = Overlay::new(init, mode, outputs, frozen, self.config.theme.clone(), confirm, preselect);
+        overlay.set_windows(std::mem::take(&mut self.pending_windows));
+        self.overlay = Some(overlay);
         self.cursor_shape = None;
         self.set_stage(Stage::Overlay);
     }
@@ -451,6 +473,7 @@ impl App {
 
     fn finish(&mut self, response: Response) {
         self.overlay = None;
+        self.pending_windows.clear();
         self.capture = None;
         if let Response::Error(e) = &response {
             log::error!("{e}");
