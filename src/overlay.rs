@@ -507,10 +507,10 @@ impl Overlay {
         }
     }
 
-    /// Closing the style panel also closes the colour selector if it was on the backdrop.
+    /// Closing the style panel also closes the colour selector if it was on the backdrop or border.
     fn close_style_panel(&mut self) {
         self.style_panel.close();
-        if let Some(p) = self.picker.as_mut().filter(|p| p.open && p.target() == Target::Backdrop) {
+        if let Some(p) = self.picker.as_mut().filter(|p| p.open && matches!(p.target(), Target::Backdrop | Target::Border)) {
             p.close();
         }
     }
@@ -1112,7 +1112,7 @@ impl Overlay {
         let (iw, ih) = (f64::from(e.image.width), f64::from(e.image.height));
         // With styling on, leave room for the frame (its padding is in image pixels too).
         let frame = match self.picker.as_ref().map(|p| &p.state().style) {
-            Some(style) if style.enabled => 2.0 * f64::from(style.padding.max(0)),
+            Some(style) if style.enabled => 2.0 * f64::from(style.margin()),
             _ => 0.0,
         };
         let fit = device.max((iw + frame) / avail_w).max((ih + frame) / avail_h).max(0.1);
@@ -1131,15 +1131,24 @@ impl Overlay {
         match self.style_panel.press(local, &mut picker.state_mut().style) {
             style_panel::Press::Outside => false,
             style_panel::Press::Handled => {
-                // Switching the backdrop off (or styling off) leaves nothing to colour.
+                // Switching the backdrop or border off (or styling off) leaves nothing to colour.
                 let style = &picker.state().style;
-                if picker.open && picker.target() == Target::Backdrop && !(style.enabled && style.background) {
+                let shown = match picker.target() {
+                    Target::Backdrop => style.enabled && style.background,
+                    Target::Border => style.enabled && style.border,
+                    Target::Annotation => true,
+                };
+                if picker.open && !shown {
                     picker.close();
                 }
                 true
             }
             style_panel::Press::EditBackdrop => {
                 picker.open_for(Target::Backdrop);
+                true
+            }
+            style_panel::Press::EditBorder => {
+                picker.open_for(Target::Border);
                 true
             }
         }
@@ -1395,8 +1404,8 @@ impl Overlay {
                             if let Some((_, old)) = s.style_frame.take() {
                                 canvas.delete_image(old);
                             }
-                            let standin = Image::new(((f64::from(size.0) * scale).round() as u32).max(1), ((f64::from(size.1) * scale).round() as u32).max(1));
-                            let frame = style::apply(&standin, &style, scale);
+                            let (fw, fh) = (((f64::from(size.0) * scale).round() as u32).max(1), ((f64::from(size.1) * scale).round() as u32).max(1));
+                            let frame = style::frame(fw, fh, &style, scale);
                             let img = femtovg::imgref::Img::new(rgba_pixels(&frame.data), frame.width as usize, frame.height as usize);
                             if let Ok(id) = canvas.create_image(img.as_ref(), ImageFlags::empty()) {
                                 s.style_frame = Some((key, id));
@@ -1404,7 +1413,7 @@ impl Overlay {
                         }
                         if let Some((_, frame)) = &s.style_frame {
                             // The frame wraps the crop, as it does in the export.
-                            let pad = (f64::from(style.padding.max(0)) / e.fit) as f32;
+                            let pad = (f64::from(style.margin()) / e.fit) as f32;
                             let (fx, fy, fw, fh) = (d.x as f32 - pad, d.y as f32 - pad, d.w as f32 + 2.0 * pad, d.h as f32 + 2.0 * pad);
                             fill_rect(canvas, fx, fy, fw, fh, Paint::image(*frame, fx, fy, fw, fh, 0.0, 1.0));
                         }
@@ -1455,15 +1464,15 @@ impl Overlay {
                     }
                 }
                 (s.buttons, s.toolbar) = draw_annotate_toolbar(canvas, t, font, w, &fill, &toolbar_state);
-                let editing_backdrop = self.picker.as_ref().is_some_and(|p| p.open && p.target() == Target::Backdrop);
+                let editing = self.picker.as_ref().filter(|p| p.open).map(|p| p.target());
                 let anchor = s.buttons.iter().find(|(_, hit)| *hit == Hit::Style).map(|(r, _)| *r);
                 if let (true, Some(anchor), Some(bar)) = (style_open, anchor, s.toolbar) {
-                    self.style_panel.draw(canvas, font, t, &style, editing_backdrop, anchor, (bar.bottom() as f32) + SPACE_SM, w);
+                    self.style_panel.draw(canvas, font, t, &style, editing, anchor, (bar.bottom() as f32) + SPACE_SM, w);
                 }
                 // The colour selector hangs under the colour button, or beside the style panel
                 // when it's editing the backdrop.
                 let placement = match self.picker.as_ref().map(|p| p.target()) {
-                    Some(Target::Backdrop) if style_open => Some(beside(self.style_panel.rect(), w)),
+                    Some(Target::Backdrop | Target::Border) if style_open => Some(beside(self.style_panel.rect(), w)),
                     _ => s.buttons.iter().find(|(_, hit)| *hit == Hit::Color).zip(s.toolbar).map(|((r, _), bar)| (picker::Placement::Under(*r), bar.bottom() as f32 + SPACE_SM)),
                 };
                 if let (Some(picker), Some((anchor, top))) = (self.picker.as_mut().filter(|p| p.open), placement) {

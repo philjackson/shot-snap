@@ -101,7 +101,9 @@ The colour button opens a picker with two tabs:
 
 The ✦ button frames the screenshot for sharing: a padded background with rounded corners and a
 drop shadow. Click the swatch next to **Background** to choose its colour or gradient, and use
-the sliders for padding, corners and the shadow. With a crop, the frame goes around the cropped
+the sliders for padding, corners and the shadow. **Border** adds a Hyprland-style outline around
+the screenshot, by default Hyprland's own cyan-to-green gradient; click its swatch to change it.
+With a crop, the frame goes around the cropped
 result.
 
 ![A styled screenshot](docs/screenshots/result.jpg)

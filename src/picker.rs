@@ -53,6 +53,8 @@ pub enum Target {
     Annotation,
     /// The screenshot style backdrop.
     Backdrop,
+    /// The screenshot style border.
+    Border,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,6 +152,7 @@ impl Picker {
         match self.target {
             Target::Annotation => &self.state.fill,
             Target::Backdrop => &self.state.style.backdrop,
+            Target::Border => &self.state.style.border_fill,
         }
     }
 
@@ -157,6 +160,7 @@ impl Picker {
         match self.target {
             Target::Annotation => &mut self.state.fill,
             Target::Backdrop => &mut self.state.style.backdrop,
+            Target::Border => &mut self.state.style.border_fill,
         }
     }
 

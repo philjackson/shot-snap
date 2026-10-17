@@ -6,6 +6,7 @@ use femtovg::{Canvas, FontId, Paint, Path};
 
 use crate::config::Theme;
 use crate::geom::Rect;
+use crate::picker::Target;
 use crate::style::Style;
 use crate::ui::{card, text_paint, text_width};
 
@@ -23,6 +24,8 @@ enum Switch {
     Enabled,
     Background,
     Shadow,
+    Border,
+    BorderShadow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,6 +36,7 @@ enum Slider {
     ShadowOpacity,
     ShadowOffsetX,
     ShadowOffsetY,
+    BorderWidth,
 }
 
 enum Row {
@@ -40,11 +44,14 @@ enum Row {
     Slider(Slider, &'static str),
 }
 
-const ROWS: [Row; 9] = [
+const ROWS: [Row; 12] = [
     Row::Switch(Switch::Enabled, "Style screenshot"),
     Row::Switch(Switch::Background, "Background"),
     Row::Slider(Slider::Padding, "Padding"),
     Row::Slider(Slider::Radius, "Corners"),
+    Row::Switch(Switch::Border, "Border"),
+    Row::Slider(Slider::BorderWidth, "Width"),
+    Row::Switch(Switch::BorderShadow, "Edge shadow"),
     Row::Switch(Switch::Shadow, "Drop shadow"),
     Row::Slider(Slider::ShadowBlur, "Blur"),
     Row::Slider(Slider::ShadowOpacity, "Opacity"),
@@ -61,6 +68,7 @@ impl Slider {
             Slider::ShadowBlur => (0.0, 200.0, 1.0),
             Slider::ShadowOpacity => (0.0, 1.0, 0.01),
             Slider::ShadowOffsetX | Slider::ShadowOffsetY => (-200.0, 200.0, 1.0),
+            Slider::BorderWidth => (1.0, 32.0, 1.0),
         }
     }
 
@@ -72,6 +80,7 @@ impl Slider {
             Slider::ShadowOpacity => f64::from(s.shadow_opacity),
             Slider::ShadowOffsetX => f64::from(s.shadow_offset_x),
             Slider::ShadowOffsetY => f64::from(s.shadow_offset_y),
+            Slider::BorderWidth => f64::from(s.border_width),
         }
     }
 
@@ -84,6 +93,7 @@ impl Slider {
             Slider::ShadowOpacity => s.shadow_opacity = v as f32,
             Slider::ShadowOffsetX => s.shadow_offset_x = i,
             Slider::ShadowOffsetY => s.shadow_offset_y = i,
+            Slider::BorderWidth => s.border_width = i,
         }
     }
 
@@ -94,9 +104,14 @@ impl Slider {
         }
     }
 
-    /// Shadow sliders only matter with the shadow on.
+    /// Shadow and border sliders only matter with those on.
     fn active(self, s: &Style) -> bool {
-        s.enabled && (matches!(self, Slider::Padding | Slider::Radius) || s.shadow)
+        s.enabled
+            && match self {
+                Slider::Padding | Slider::Radius => true,
+                Slider::BorderWidth => s.border,
+                _ => s.shadow,
+            }
     }
 }
 
@@ -106,6 +121,8 @@ impl Switch {
             Switch::Enabled => s.enabled,
             Switch::Background => s.background,
             Switch::Shadow => s.shadow,
+            Switch::Border => s.border,
+            Switch::BorderShadow => s.border_shadow,
         }
     }
 
@@ -114,11 +131,17 @@ impl Switch {
             Switch::Enabled => s.enabled ^= true,
             Switch::Background => s.background ^= true,
             Switch::Shadow => s.shadow ^= true,
+            Switch::Border => s.border ^= true,
+            Switch::BorderShadow => s.border_shadow ^= true,
         }
     }
 
     fn active(self, s: &Style) -> bool {
-        self == Switch::Enabled || s.enabled
+        match self {
+            Switch::Enabled => true,
+            Switch::BorderShadow => s.enabled && s.border,
+            _ => s.enabled,
+        }
     }
 }
 
@@ -129,6 +152,8 @@ pub enum Press {
     Handled,
     /// The backdrop swatch: open the colour selector on the backdrop.
     EditBackdrop,
+    /// The border swatch: open the colour selector on the border.
+    EditBorder,
 }
 
 #[derive(Default)]
@@ -139,6 +164,7 @@ pub struct StylePanel {
     switches: Vec<(Rect, Switch)>,
     sliders: Vec<(Rect, Slider)>,
     backdrop_swatch: Rect,
+    border_swatch: Rect,
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -177,6 +203,9 @@ impl StylePanel {
         if style.enabled && style.background && self.backdrop_swatch.contains(p) {
             return Press::EditBackdrop;
         }
+        if style.enabled && style.border && self.border_swatch.contains(p) {
+            return Press::EditBorder;
+        }
         if let Some(&(track, slider)) = self.sliders.iter().find(|(r, _)| Rect { y: r.y - 8.0, h: r.h + 16.0, ..*r }.contains(p)) {
             self.drag = Some((slider, track));
             self.motion(p, style);
@@ -198,8 +227,8 @@ impl StylePanel {
 
     /// Lays out and draws the panel under `anchor`, kept within `surface_w`.
     #[allow(clippy::too_many_arguments)]
-    /// `editing_backdrop` rings the backdrop swatch while the colour selector is on it.
-    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, style: &Style, editing_backdrop: bool, anchor: Rect, top: f32, surface_w: f32) {
+    /// `editing` rings the backdrop or border swatch while the colour selector is on it.
+    pub fn draw(&mut self, canvas: &mut Canvas<OpenGl>, font: Option<FontId>, t: &Theme, style: &Style, editing: Option<Target>, anchor: Rect, top: f32, surface_w: f32) {
         let w = PAD * 2.0 + LABEL_W + GAP + SLIDER_W + GAP + VALUE_W;
         let h = PAD * 2.0 + ROW_H * ROWS.len() as f32;
         let x0 = ((anchor.x + anchor.w / 2.0) as f32 - w / 2.0).clamp(8.0, (surface_w - w - 8.0).max(8.0)).round();
@@ -207,6 +236,7 @@ impl StylePanel {
         self.switches.clear();
         self.sliders.clear();
         self.backdrop_swatch = Rect::default();
+        self.border_swatch = Rect::default();
         card(canvas, (x0, top, w, h), 12.0, t.surface.with_alpha(0.94), t.outline);
 
         let x = x0 + PAD;
@@ -234,11 +264,21 @@ impl StylePanel {
                     let mut dot = Path::new();
                     dot.circle(if on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 }, cy, sh / 2.0 - 3.0);
                     canvas.fill_path(&dot, &Paint::color(knob.with_alpha(alpha).fv()));
-                    // The backdrop's own colour; click it to change it. Only while it's shown.
-                    if *switch == Switch::Background && style.enabled && style.background {
+                    // The backdrop's or border's own colour; click it to change it. Only while it's shown.
+                    let swatch = match switch {
+                        Switch::Background if style.enabled && style.background => Some((&style.backdrop, Target::Backdrop)),
+                        Switch::Border if style.enabled && style.border => Some((&style.border_fill, Target::Border)),
+                        _ => None,
+                    };
+                    if let Some((fill, target)) = swatch {
                         let r = rect(sx - GAP - 18.0, cy - 9.0, 18.0, 18.0);
-                        crate::picker::swatch(canvas, r, &style.backdrop, editing_backdrop, t, false);
-                        self.backdrop_swatch = Rect { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
+                        crate::picker::swatch(canvas, r, fill, editing == Some(target), t, false);
+                        let hit = Rect { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
+                        if target == Target::Backdrop {
+                            self.backdrop_swatch = hit;
+                        } else {
+                            self.border_swatch = hit;
+                        }
                     }
                     self.switches.push((rect(sx - 4.0, cy - ROW_H / 2.0, sw + 8.0, ROW_H), *switch));
                 }
